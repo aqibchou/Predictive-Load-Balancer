@@ -1,0 +1,4 @@
+data/
+*.gz
+*.log
+*.txt
