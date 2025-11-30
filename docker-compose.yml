@@ -1,0 +1,82 @@
+version: '3.8'
+# Definition of the entire system
+services:
+  # PostgreSQL for metrics (extra stuff will take on time permitting)
+  postgres:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: loadbalancer
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - loadbalancer_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Load balancer
+  load_balancer:
+    build: ./load_balancer
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config
+    environment:
+      CONFIG_PATH: /app/config/servers.yaml
+    networks:
+      - loadbalancer_net
+
+  # Backend server 1
+  backend_1:
+    build: ./backend
+    environment:
+      SERVER_ID: server_1
+    networks:
+      - loadbalancer_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend server 2
+  backend_2:
+    build: ./backend
+    environment:
+      SERVER_ID: server_2
+    networks:
+      - loadbalancer_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend server 3
+  backend_3:
+    build: ./backend
+    environment:
+      SERVER_ID: server_3
+    networks:
+      - loadbalancer_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  loadbalancer_net:
+    driver: bridge
+
+volumes:
+  postgres_data:

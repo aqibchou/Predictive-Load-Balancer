@@ -11,7 +11,7 @@ import uvicorn
 app = FastAPI()
 
 # Server configuration
-SERVER_ID = os.getenv("SERVER_ID", "server_unknown")
+SERVER_ID = os.getenv("SERVER_ID", "server_unknown") # docker will set this up
 CACHE_MAX_SIZE = 100
 CACHE_HIT_LATENCY = 0.05  # 50ms
 CACHE_MISS_LATENCY = 0.20  # 200ms
@@ -128,11 +128,13 @@ async def get_metrics():
         uptime_seconds=metrics.get_uptime_seconds()
     )
 
+# Accept any path and increment the request counter 
 @app.get("/{path:path}")
 async def handle_request(path: str):
     start_time = time.time()
     metrics.active_requests += 1
     
+    # Simulate some processing 
     try:
         is_cached = cache.get(path)
         

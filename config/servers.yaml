@@ -1,0 +1,7 @@
+servers:
+  - id: server_1
+    url: http://backend_1:8000
+  - id: server_2
+    url: http://backend_2:8000
+  - id: server_3
+    url: http://backend_3:8000
