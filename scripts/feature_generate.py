@@ -196,6 +196,12 @@ def engineer_features(input_file: Path, output_file: Path):
     print("Step 5: Creating statistical features...")
     df_minute = create_statistical_features(df_minute)
     print("  Added: traffic_change_5min, same_hour_historical_avg, deviation_from_historical\n")
+
+    # STEP 5.5: Extra step needed to fix target variable
+    print("Step 5.5: Creating future target variable...")
+    # Shift request_count backward by 5 to get traffic 5 minutes ahead
+    df_minute['target'] = df_minute['request_count'].shift(-5)
+    print("  Added: target (request_count 5 minutes in future)\n")
     
     # STEP 6: Handle missing values
     print("Step 6: Handling missing values...")
