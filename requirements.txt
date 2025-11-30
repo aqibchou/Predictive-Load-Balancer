@@ -1,1 +1,4 @@
 #requirements here
+fastapi==0.104.1
+uvicorn==0.24.0 # server to run fastapi
+pydantic==2.5.0 # for data validation
