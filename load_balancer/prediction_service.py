@@ -2,16 +2,20 @@ import asyncio
 import pickle
 import os
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
-from dataclasses import dataclass, field
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
 import pandas as pd
+import numpy as np
 
+# Model path is taken from env or defaults to inside container
 MODEL_PATH = os.getenv("PROPHET_MODEL_PATH", "/app/models/prophet_model.pkl")
+
+# Prediction loop interval
 PREDICTION_INTERVAL_SECONDS = 60
 HISTORY_WINDOW_MINUTES = 60
 
 
-@dataclass # type hints, automatic constructors 
+@dataclass  # type hints + automatic constructor
 class TrafficPrediction:
     timestamp: datetime
     predicted_1min: float
@@ -21,6 +25,7 @@ class TrafficPrediction:
     upper_bound_5min: float
     uncertainty: float
     model_loaded: bool = True
+    features_available: bool = True  # new flag for your extended feature logic
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -31,7 +36,8 @@ class TrafficPrediction:
             "lower_bound_5min": round(self.lower_bound_5min, 2),
             "upper_bound_5min": round(self.upper_bound_5min, 2),
             "uncertainty": round(self.uncertainty, 2),
-            "model_loaded": self.model_loaded
+            "model_loaded": self.model_loaded,
+            "features_available": self.features_available,
         }
 
 
@@ -42,55 +48,171 @@ class PredictionService:
         self.prediction_history: list = []
         self.is_running = False
         self._task: Optional[asyncio.Task] = None
-    
-    # Loads prophet model(trained) at  startup
+        self._aggregate_task: Optional[asyncio.Task] = None
+
+    # Loads Prophet model at startup
     def load_model(self) -> bool:
         try:
-            with open(MODEL_PATH, 'rb') as f:
+            with open(MODEL_PATH, "rb") as f:
                 self.model = pickle.load(f)
             print(f"Prophet model loaded from {MODEL_PATH}")
             return True
-        # Should not happen - just to be safe 
+
         except FileNotFoundError:
             print(f"Prophet model not found at {MODEL_PATH}")
             return False
+
         except Exception as e:
             print(f"Error loading Prophet model: {e}")
             return False
-    
+
+    # Start background prediction + aggregate loop
     async def start(self):
         if self.is_running:
             return
-        
+
         self.is_running = True
         self._task = asyncio.create_task(self._prediction_loop())
+        self._aggregate_task = asyncio.create_task(self._aggregate_loop())
         print("Prediction service started")
-    
+
+    # Stop background tasks cleanly
     async def stop(self):
         self.is_running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for task in [self._task, self._aggregate_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         print("Prediction service stopped")
-    
 
-    # Runs every 60 seconds and is the backround service
+    # Runs every minute to update database aggregates
+    async def _aggregate_loop(self):
+        from database import update_minute_aggregate
+
+        while self.is_running:
+            try:
+                await update_minute_aggregate()
+            except Exception as e:
+                print(f"Aggregate update error: {e}")
+
+            await asyncio.sleep(60)
+
+    # Background prediction loop running every 60 seconds
     async def _prediction_loop(self):
+        await asyncio.sleep(5)  # initial delay before first prediction
+
         while self.is_running:
             try:
                 await self._run_prediction()
             except Exception as e:
                 print(f"Prediction error: {e}")
-            
+
             await asyncio.sleep(PREDICTION_INTERVAL_SECONDS)
-    
-    # Actual prediction logic is here 
+
+    # Compute rich feature set for Prophet regression
+    def _compute_features(self, ds: datetime, traffic_history: List[Dict]) -> Dict[str, float]:
+        features = {}
+
+        # Base calendar features
+        features["hour"] = ds.hour
+        features["day_of_week"] = ds.weekday()
+        features["is_weekend"] = 1 if ds.weekday() >= 5 else 0
+        features["is_business_hours"] = 1 if 9 <= ds.hour <= 17 else 0
+
+        # No historical data
+        if not traffic_history:
+            features.update({
+                "traffic_5min_avg": 0,
+                "traffic_15min_avg": 0,
+                "traffic_30min_avg": 0,
+                "traffic_60min_avg": 0,
+                "traffic_15min_std": 0,
+                "traffic_lag_1min": 0,
+                "traffic_lag_5min": 0,
+                "traffic_lag_10min": 0,
+                "traffic_lag_15min": 0,
+                "traffic_lag_30min": 0,
+                "traffic_lag_60min": 0,
+                "traffic_change_5min": 0,
+                "same_hour_historical_avg": 0,
+                "deviation_from_historical": 0,
+                "total_bytes": 0,
+                "avg_bytes": 0,
+                "success_rate": 1.0,
+            })
+            return features
+
+        # Build dataframe
+        df = pd.DataFrame(traffic_history)
+        df["minute_bucket"] = pd.to_datetime(df["minute_bucket"])
+        df = df.sort_values("minute_bucket")
+
+        counts = df["request_count"].values
+
+        # Rolling averages
+        features["traffic_5min_avg"] = float(np.mean(counts[-5:])) if len(counts) >= 5 else float(np.mean(counts))
+        features["traffic_15min_avg"] = float(np.mean(counts[-15:])) if len(counts) >= 15 else float(np.mean(counts))
+        features["traffic_30min_avg"] = float(np.mean(counts[-30:])) if len(counts) >= 30 else float(np.mean(counts))
+        features["traffic_60min_avg"] = float(np.mean(counts))
+
+        # Variation / std
+        if len(counts) >= 15:
+            features["traffic_15min_std"] = float(np.std(counts[-15:]))
+        else:
+            features["traffic_15min_std"] = float(np.std(counts)) if len(counts) > 1 else 0
+
+        # Lags
+        features["traffic_lag_1min"] = float(counts[-1]) if len(counts) >= 1 else 0
+        features["traffic_lag_5min"] = float(counts[-5]) if len(counts) >= 5 else 0
+        features["traffic_lag_10min"] = float(counts[-10]) if len(counts) >= 10 else 0
+        features["traffic_lag_15min"] = float(counts[-15]) if len(counts) >= 15 else 0
+        features["traffic_lag_30min"] = float(counts[-30]) if len(counts) >= 30 else 0
+        features["traffic_lag_60min"] = float(counts[-60]) if len(counts) >= 60 else 0
+
+        # Short-term spike indicator
+        if len(counts) >= 5:
+            features["traffic_change_5min"] = float(counts[-1] - counts[-5])
+        else:
+            features["traffic_change_5min"] = 0
+
+        # Same hour historical average
+        same_hour = df[df["minute_bucket"].dt.hour == ds.hour]
+        features["same_hour_historical_avg"] = (
+            float(same_hour["request_count"].mean()) if len(same_hour) > 0 else features["traffic_60min_avg"]
+        )
+
+        # Deviation from typical hour pattern
+        if features["same_hour_historical_avg"] > 0:
+            features["deviation_from_historical"] = (
+                (features["traffic_lag_1min"] - features["same_hour_historical_avg"])
+                / features["same_hour_historical_avg"]
+            )
+        else:
+            features["deviation_from_historical"] = 0
+
+        # Byte-level features (optional)
+        features["total_bytes"] = float(df["total_bytes"].sum()) if "total_bytes" in df.columns else 0
+        features["avg_bytes"] = float(df["total_bytes"].mean()) if "total_bytes" in df.columns else 0
+
+        # Success rate (if available)
+        if "success_count" in df.columns and "total_count" in df.columns:
+            total = df["total_count"].sum()
+            success = df["success_count"].sum()
+            features["success_rate"] = float(success / total) if total > 0 else 1.0
+        else:
+            features["success_rate"] = 1.0
+
+        return features
+
+    # Actual prediction execution
     async def _run_prediction(self):
+        from database import get_recent_traffic
+
+        # If model failed to load, return zeros
         if self.model is None:
-            # Dataframe stores future timesteams 1,3,5
             self.current_prediction = TrafficPrediction(
                 timestamp=datetime.now(),
                 predicted_1min=0,
@@ -99,32 +221,43 @@ class PredictionService:
                 lower_bound_5min=0,
                 upper_bound_5min=0,
                 uncertainty=0,
-                model_loaded=False
+                model_loaded=False,
+                features_available=False,
             )
             return
-        
-        now = datetime.now()
-        
-        # prophet accepts ds format 
-        future_dates = pd.DataFrame({
-            'ds': [
-                now + timedelta(minutes=1),
-                now + timedelta(minutes=3),
-                now + timedelta(minutes=5)
-            ]
-        })
 
-        # return yhat as well as the upper and lower bounds 
-        forecast = self.model.predict(future_dates)
-        
-        # Prophet can give negative vals sometimes, so keep the max 
-        pred_1min = max(0, forecast.iloc[0]['yhat'])
-        pred_3min = max(0, forecast.iloc[1]['yhat'])
-        pred_5min = max(0, forecast.iloc[2]['yhat'])
-        lower_5min = max(0, forecast.iloc[2]['yhat_lower'])
-        upper_5min = max(0, forecast.iloc[2]['yhat_upper'])
-        
-        # Wrap in traffic prediction dataclass 
+        # Pull recent traffic history
+        traffic_history = await get_recent_traffic(minutes=60)
+        features_available = len(traffic_history) > 0
+
+        now = datetime.now()
+
+        # Predict at +1, +3, +5 min
+        future_times = [
+            now + timedelta(minutes=1),
+            now + timedelta(minutes=3),
+            now + timedelta(minutes=5),
+        ]
+
+        rows = []
+        for ds in future_times:
+            row = {"ds": ds}
+            row.update(self._compute_features(ds, traffic_history))
+            rows.append(row)
+
+        future_df = pd.DataFrame(rows)
+
+        # Prophet prediction
+        forecast = self.model.predict(future_df)
+
+        # Extract values safely (non-negative)
+        pred_1min = max(0, forecast.iloc[0]["yhat"])
+        pred_3min = max(0, forecast.iloc[1]["yhat"])
+        pred_5min = max(0, forecast.iloc[2]["yhat"])
+        lower_5min = max(0, forecast.iloc[2]["yhat_lower"])
+        upper_5min = max(0, forecast.iloc[2]["yhat_upper"])
+
+        # Wrap results in dataclass
         self.current_prediction = TrafficPrediction(
             timestamp=now,
             predicted_1min=pred_1min,
@@ -132,31 +265,35 @@ class PredictionService:
             predicted_5min=pred_5min,
             lower_bound_5min=lower_5min,
             upper_bound_5min=upper_5min,
-            uncertainty=upper_5min - lower_5min
+            uncertainty=upper_5min - lower_5min,
+            features_available=features_available,
         )
-        
+
+        # Keep last 60 predictions
         self.prediction_history.append(self.current_prediction)
         if len(self.prediction_history) > 60:
             self.prediction_history = self.prediction_history[-60:]
-        
+
         print(f"Prediction: {pred_5min:.1f} req/min in 5min (±{self.current_prediction.uncertainty:.1f})")
-    
+
+    # Basic accessors
     def get_current_prediction(self) -> Optional[TrafficPrediction]:
         return self.current_prediction
-    
+
     def get_prediction_for_scaler(self) -> Dict[str, float]:
         if self.current_prediction is None:
             return {
                 "predicted_load_5min": 0,
                 "prediction_uncertainty": 100,
-                "prediction_available": False
+                "prediction_available": False,
             }
-        
+
         return {
             "predicted_load_5min": self.current_prediction.predicted_5min,
             "prediction_uncertainty": self.current_prediction.uncertainty,
-            "prediction_available": self.current_prediction.model_loaded
+            "prediction_available": self.current_prediction.model_loaded,
         }
 
 
+# Global singleton instance
 prediction_service = PredictionService()

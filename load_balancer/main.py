@@ -11,6 +11,7 @@ import yaml
 
 # Making predictions ahead of time 
 from prediction_service import prediction_service
+from database import init_database, close_database, log_request
 
 app = FastAPI()
 
@@ -96,6 +97,7 @@ def load_server_config():
 async def lifespan(app: FastAPI):
     # Startup: runs once when app starts
     load_server_config()
+    await init_database()
     
     # load the model
     prediction_service.load_model()
@@ -104,6 +106,7 @@ async def lifespan(app: FastAPI):
     print(f"Load balancer started with {len(state.servers)} backend servers")
     yield
     await prediction_service.stop()
+    await close_database()
     print("Load Balancer shutdown complete")
 
 app = FastAPI(lifespan=lifespan)
@@ -162,6 +165,16 @@ async def route_request(path: str):
             backend_data = response.json()
             
             total_time = time.time() - start_time
+
+            # Log to database
+            await log_request(
+                server_id=server['id'],
+                path=path,
+                response_time_ms=total_time * 1000,
+                status_code=response.status_code,
+                cache_hit=backend_data.get('cache_hit', False),
+                bytes_sent=backend_data.get('bytes', 0)
+            )
             
             # Send back to client 
             return RouteResponse(
