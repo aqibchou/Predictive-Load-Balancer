@@ -10,5 +10,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # copy server code from machine -> to this container 
 COPY *.py .
 
+# Copy the models
+COPY models/prophet_model.pkl /app/models/
+
 # Run the fastAPI when the container starts 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

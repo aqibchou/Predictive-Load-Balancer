@@ -9,6 +9,9 @@ from pydantic import BaseModel
 import httpx
 import yaml
 
+# Making predictions ahead of time 
+from prediction_service import prediction_service
+
 app = FastAPI()
 
 # Configuration
@@ -58,6 +61,16 @@ class RouteResponse(BaseModel):
     total_time_ms: float
     timestamp: str
 
+class PredictionResponse(BaseModel):
+    timestamp: str
+    predicted_1min: float
+    predicted_3min: float
+    predicted_5min: float
+    lower_bound_5min: float
+    upper_bound_5min: float
+    uncertainty: float
+    model_loaded: bool
+
 # Load server configuration
 # Reads from servers.yaml
 def load_server_config():
@@ -83,9 +96,16 @@ def load_server_config():
 async def lifespan(app: FastAPI):
     # Startup: runs once when app starts
     load_server_config()
+    
+    # load the model
+    prediction_service.load_model()
+    await prediction_service.start()
+
     print(f"Load balancer started with {len(state.servers)} backend servers")
     yield
-    # Shutdown: runs when app stops (TODO)
+    await prediction_service.stop()
+    print("Load Balancer shutdown complete")
+
 app = FastAPI(lifespan=lifespan)
 # System statisics
 # shows distribution across servers
@@ -106,6 +126,22 @@ async def health_check():
         "status": "healthy",
         "num_servers": len(state.servers),
         "uptime_seconds": state.get_uptime_seconds()
+    }
+
+
+@app.get("/prediction")
+async def get_prediction():
+    pred = prediction_service.get_current_prediction()
+    if pred is None:
+        return {"status": "no prediction available yet"}
+    return PredictionResponse(**pred.to_dict())
+
+
+@app.get("/prediction/history")
+async def get_prediction_history():
+    return {
+        "count": len(prediction_service.prediction_history),
+        "predictions": [p.to_dict() for p in prediction_service.prediction_history[-10:]]
     }
 
 # Main routing logic 
