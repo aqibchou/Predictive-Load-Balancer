@@ -128,6 +128,15 @@ async def get_metrics():
         uptime_seconds=metrics.get_uptime_seconds()
     )
 
+# Cache state used for A* routing 
+@app.get("/cache")
+async def get_cache_contents():
+    return {
+        "server_id": SERVER_ID,
+        "cached_paths": list(cache.cache.keys()),
+        "cache_size": cache.size()
+    }
+
 # Accept any path and increment the request counter 
 @app.get("/{path:path}")
 async def handle_request(path: str):

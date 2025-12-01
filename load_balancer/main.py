@@ -13,6 +13,9 @@ import yaml
 from prediction_service import prediction_service
 from database import init_database, close_database, log_request
 
+# A* implementation
+from routing import router
+
 app = FastAPI()
 
 # Configuration
@@ -98,6 +101,9 @@ async def lifespan(app: FastAPI):
     # Startup: runs once when app starts
     load_server_config()
     await init_database()
+
+    for server in state.servers:
+        router.register_server(server['id'], server['url'])
     
     # load the model
     prediction_service.load_model()
@@ -120,8 +126,16 @@ async def get_stats():
         uptime_seconds=state.get_uptime_seconds(),
         num_servers=len(state.servers),
         requests_per_server=state.server_request_counts,
-        routing_algorithm="round-robin"
+        routing_algorithm="a-star" # deprecated round robin to use A*
     )
+
+# Debugging purposes
+@app.get("/routing/debug/{path:path}")
+async def debug_routing(path: str):
+    return {
+        "request_path": path,
+        "server_scores": router.get_routing_decision_info(path)
+    }
 
 @app.get("/health")
 async def health_check():
@@ -148,7 +162,8 @@ async def get_prediction_history():
     }
 
 # Main routing logic 
-@app.get("/{path:path}")
+# Round robin logic (deprecated to use A* instead)
+'''@app.get("/{path:path}")
 async def route_request(path: str):
     start_time = time.time()
 
@@ -195,7 +210,62 @@ async def route_request(path: str):
                 status_code=500,
                 detail=f"Error routing to {server['id']}: {str(e)}"
             )
+'''
+# A* routing 
+@app.get("/{path:path}")
+async def route_request(path: str):
+    start_time = time.time()
 
+    server_state = await router.select_server(path)
+    if server_state is None:
+        raise HTTPException(status_code=503, detail="No backend servers available")
+    
+    server_id = server_state.server_id
+    server_url = server_state.url
+    
+    state.record_request(server_id)
+    router.record_request_start(server_id)
+    
+    backend_url = f"{server_url}/{path}"
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.get(backend_url)
+            backend_data = response.json()
+            
+            total_time = time.time() - start_time
+            
+            router.record_request_end(server_id, total_time * 1000, path)
+
+            await log_request(
+                server_id=server_id,
+                path=path,
+                response_time_ms=total_time * 1000,
+                status_code=response.status_code,
+                cache_hit=backend_data.get('cached', False),
+                bytes_sent=backend_data.get('bytes', 0)
+            )
+            
+            return RouteResponse(
+                load_balancer_id="load_balancer_main",
+                routed_to=server_id,
+                backend_response=backend_data,
+                total_time_ms=total_time * 1000,
+                timestamp=datetime.now().isoformat()
+            )
+        
+        except httpx.RequestError as e:
+            router.record_request_end(server_id, 0, path)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Backend server {server_id} unavailable: {str(e)}"
+            )
+        except Exception as e:
+            router.record_request_end(server_id, 0, path)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error routing to {server_id}: {str(e)}"
+            )
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
