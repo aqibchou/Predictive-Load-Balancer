@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Optional, Dict
 import sys
 
-#### TESTING A SAMPLE REGEX - MIGHT NEED TO REMOVE LATER 
 # Apache Common Log Format regex pattern
 # Groups: (host) (timestamp) (method) (path) (status) (bytes)
 
@@ -58,11 +57,10 @@ def parse_timestamp(timestamp_str: str) -> Optional[str]:
     """
     try:
         # Parse: "01/Jul/1995:00:00:01 -0400"
-        # Apache uses this insane format, so we need to specify it exactly
+        # specify it exactly
         dt = datetime.strptime(timestamp_str, "%d/%b/%Y:%H:%M:%S %z")
         
         # Convert to ISO format without timezone (we'll treat all as UTC)
-        # Why remove timezone? NASA logs are all Eastern time, treating uniformly simplifies analysis
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
         # Invalid timestamp format - corrupted log line
@@ -72,10 +70,7 @@ def parse_timestamp(timestamp_str: str) -> Optional[str]:
 def parse_bytes(bytes_str: str) -> int:
     """
     Convert byte string to integer
-    
-    Why special handling?
-    - Apache logs use "-" for 0 bytes (responses with no body)
-    - Some entries might be corrupted (non-numeric values)
+
     
     Args:
         bytes_str: "6245" or "-"
@@ -184,7 +179,7 @@ def extract_logs(input_file: Path, output_file: Path):
     # Warning if failure rate is too high
     failure_rate = failed_lines / total_lines
     if failure_rate > 0.05:  # More than 5% failed
-        print(f"\n⚠️  WARNING: High failure rate ({failure_rate*100:.1f}%)")
+        print(f"\n  WARNING: High failure rate ({failure_rate*100:.1f}%)")
         print("   Check your input file format or regex pattern")
 
 

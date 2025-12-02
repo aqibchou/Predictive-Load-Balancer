@@ -25,7 +25,7 @@ class TrafficPrediction:
     upper_bound_5min: float
     uncertainty: float
     model_loaded: bool = True
-    features_available: bool = True  # new flag for your extended feature logic
+    features_available: bool = True  # feature logic
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -112,7 +112,7 @@ class PredictionService:
 
             await asyncio.sleep(PREDICTION_INTERVAL_SECONDS)
 
-    # Compute rich feature set for Prophet regression
+    # Compute  feature set for Prophet regression
     def _compute_features(self, ds: datetime, traffic_history: List[Dict]) -> Dict[str, float]:
         features = {}
 

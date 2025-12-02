@@ -37,11 +37,6 @@ def validate_status_code(status: str) -> bool:
     """
     Check if status code is valid HTTP code
     
-    Why validate?
-    - Corrupted logs might have "---" or random strings
-    - Non-HTTP traffic might be in the logs
-    - Invalid codes break ML training
-    
     Args:
         status: String status code from CSV
     
@@ -59,10 +54,6 @@ def validate_status_code(status: str) -> bool:
 def validate_bytes(bytes_val: str) -> bool:
     """
     Check if byte size is realistic
-    
-    Why these bounds?
-    - MIN: Can't serve negative bytes
-    - MAX: 100MB is generous for 1995 (most files were <1MB)
     
     Edge cases:
     - 0 bytes is VALID (HTTP 304 Not Modified has 0-byte body)
@@ -181,7 +172,7 @@ def clean_data(input_file: Path, output_file: Path):
     print(f"  Remaining: {after:,}\n")
     
     # STEP 3: Filter invalid status codes
-    print("Step 3: Filtering invalid HTTP status codes...")
+    print("Step 3: Filtering invalid HTTP status codes")
     before = len(df)
     # Apply validation function to each status code
     # Keep only rows where validate_status_code returns True
@@ -193,7 +184,7 @@ def clean_data(input_file: Path, output_file: Path):
     print(f"  Remaining: {after:,}\n")
     
     # STEP 4: Remove byte outliers
-    print("Step 4: Removing byte size outliers...")
+    print("Step 4: Removing byte size outliers")
     before = len(df)
     df = df[df['bytes'].apply(validate_bytes)]
     after = len(df)
@@ -203,7 +194,7 @@ def clean_data(input_file: Path, output_file: Path):
     print(f"  Remaining: {after:,}\n")
     
     # STEP 5: Analyze timestamp quality
-    print("Step 5: Analyzing timestamp quality...")
+    print("Step 5: Analyzing timestamp quality")
     ts_stats = detect_timestamp_issues(df)
     print(f"  Sorted: {ts_stats['is_sorted']}")
     print(f"  Duplicate timestamps: {ts_stats['duplicate_timestamps']:,}")
@@ -218,7 +209,7 @@ def clean_data(input_file: Path, output_file: Path):
     print()
     
     # STEP 6: Sort by timestamp
-    print("Step 6: Sorting by timestamp...")
+    print("Step 6: Sorting by timestamp")
     df = df.sort_values('timestamp').reset_index(drop=True)
     
     # STEP 7: Final statistics

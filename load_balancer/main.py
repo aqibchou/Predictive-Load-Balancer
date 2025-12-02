@@ -16,6 +16,9 @@ from database import init_database, close_database, log_request
 # A* implementation
 from routing import router
 
+# Scaling
+from scaling import scaler, RawMetrics
+
 app = FastAPI()
 
 # Configuration
@@ -109,8 +112,23 @@ async def lifespan(app: FastAPI):
     prediction_service.load_model()
     await prediction_service.start()
 
+    # Start scaling loop
+    async def scaling_loop():
+        await asyncio.sleep(30)  # Wait for system to stabilize
+        while True:
+            try:
+                decision = await run_scaling_decision()
+                print(f"Scaling decision: {decision['action']} (ε={decision['epsilon']})")
+            except Exception as e:
+                print(f"Scaling error: {e}")
+            await asyncio.sleep(60)  # Run every 60 seconds
+    
+    scaling_task = asyncio.create_task(scaling_loop())
+
     print(f"Load balancer started with {len(state.servers)} backend servers")
     yield
+
+    scaling_task.cancel()
     await prediction_service.stop()
     await close_database()
     print("Load Balancer shutdown complete")
@@ -160,6 +178,59 @@ async def get_prediction_history():
         "count": len(prediction_service.prediction_history),
         "predictions": [p.to_dict() for p in prediction_service.prediction_history[-10:]]
     }
+
+# Q learning endpoints 
+@app.get("/scaling/status")
+async def get_scaling_status():
+    return {
+        "current_servers": scaler.current_servers,
+        "epsilon": round(scaler.epsilon, 3),
+        "last_scale_time": scaler.last_scale_time.isoformat() if scaler.last_scale_time else None,
+        "recent_decisions": scaler.decision_history[-5:]
+    }
+
+
+@app.get("/scaling/qtable")
+async def get_q_table():
+    return scaler.get_q_table_summary()
+
+async def run_scaling_decision():
+    #Collect metrics and make scaling decision
+    from routing import router
+    
+    # Get prediction from Prophet
+    pred = prediction_service.get_current_prediction()
+    predicted_load = pred.predicted_5min if pred else 0
+    uncertainty = pred.uncertainty if pred else 0
+    
+    # Get current load from router state
+    total_active = 0
+    for s in router.servers.values():
+        total_active += s.active_requests
+
+    num_servers = len(router.servers)
+    avg_load = (total_active / num_servers * 100) if num_servers > 0 else 0
+    
+    # Get latency from recent requests (simplified - use avg response time)
+    if num_servers > 0:
+        total_latency = 0
+        for s in router.servers.values():
+            total_latency += s.avg_response_time_ms
+        avg_latency = total_latency / num_servers
+    else:
+        avg_latency = 0
+    
+    metrics = RawMetrics(
+        current_servers=scaler.current_servers,
+        avg_load_percent=avg_load,
+        predicted_load_5min=predicted_load,
+        current_load=total_active,
+        p95_latency_ms=avg_latency,
+        prediction_uncertainty=uncertainty
+    )
+    
+    decision = scaler.make_decision(metrics)
+    return decision
 
 # Main routing logic 
 # Round robin logic (deprecated to use A* instead)

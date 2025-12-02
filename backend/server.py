@@ -158,7 +158,7 @@ async def handle_request(path: str):
         
         return RequestResponse(
             server_id=SERVER_ID,
-            path=path,
+            path = path,
             cached=is_cached,
             response_time_ms=response_time * 1000,
             timestamp=datetime.now().isoformat()

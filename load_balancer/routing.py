@@ -22,6 +22,7 @@ class ServerState:
     cached_paths: Set[str] = field(default_factory=set)
     last_updated: datetime = field(default_factory=datetime.now)
     consecutive_failures: int = 0
+    fetched: bool = False
 
 # A* implemenation 
 class AStarRouter:
@@ -67,7 +68,7 @@ class AStarRouter:
                 cache_resp = await client.get(f"{server.url}/cache")
                 cache_data = cache_resp.json()
                 server.cached_paths = set(cache_data.get('cached_paths', []))
-                
+                server.fetched = True
                 server.last_updated = datetime.now()
                 
             except Exception as e:
@@ -88,8 +89,20 @@ class AStarRouter:
         if not self.servers:
             return None
         
-        any_stale = any(self.is_state_stale(s) for s in self.servers.values())
-        if any_stale:
+        # Fetch state if stale OR if never fetched (avg_response_time is 0 for all)
+        any_stale = False
+        for s in self.servers.values():
+            if self.is_state_stale(s):
+                any_stale = True
+                break
+
+        any_never_fetched = False
+        for s in self.servers.values():
+            if not s.fetched:
+                any_never_fetched = True
+                break
+
+        if any_stale or any_never_fetched:
             await self.update_all_servers()
         
         scored_servers = []
@@ -102,6 +115,8 @@ class AStarRouter:
         best_score, best_server = scored_servers[0]
         
         return best_server
+
+
     
     def record_request_start(self, server_id: str):
         if server_id in self.servers:
