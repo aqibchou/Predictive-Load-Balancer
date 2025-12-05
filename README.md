@@ -2,6 +2,7 @@
 
 A proactive load balancing system that uses machine learning to predict traffic patterns and make intelligent routing and scaling decisions.
 
+**[Project Report](./docs/COMP3106_Project_Report.pdf)**
 
 ## Overview
 
