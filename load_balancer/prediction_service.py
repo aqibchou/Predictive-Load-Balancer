@@ -7,6 +7,12 @@ from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 
+from database import get_recent_traffic
+from datetime import datetime
+from prophet import Prophet  
+import pandas as pd
+
+
 # Model path is taken from env or defaults to inside container
 MODEL_PATH = os.getenv("PROPHET_MODEL_PATH", "/app/models/prophet_model.pkl")
 
@@ -51,7 +57,7 @@ class PredictionService:
         self._aggregate_task: Optional[asyncio.Task] = None
 
     # Loads Prophet model at startup
-    def load_model(self) -> bool:
+    '''def load_model(self) -> bool:
         try:
             with open(MODEL_PATH, "rb") as f:
                 self.model = pickle.load(f)
@@ -64,7 +70,11 @@ class PredictionService:
 
         except Exception as e:
             print(f"Error loading Prophet model: {e}")
-            return False
+            return False'''
+    # training model at runtime
+    def load_model(self) -> bool:
+        print("Using real-time Prophet retraining (no pre-trained model needed)")
+        return True  
 
     # Start background prediction + aggregate loop
     async def start(self):
@@ -206,7 +216,7 @@ class PredictionService:
             features["success_rate"] = 1.0
 
         return features
-
+    '''
     # Actual prediction execution
     async def _run_prediction(self):
         from database import get_recent_traffic
@@ -275,7 +285,120 @@ class PredictionService:
             self.prediction_history = self.prediction_history[-60:]
 
         print(f"Prediction: {pred_5min:.1f} req/min in 5min (±{self.current_prediction.uncertainty:.1f})")
+    '''
+    async def _run_prediction(self):
 
+        # Pull recent traffic history
+        traffic_history = await get_recent_traffic(minutes=60)
+        
+        # use defaults
+        if not traffic_history or len(traffic_history) < 3:
+            now = datetime.now()
+            self.current_prediction = TrafficPrediction(
+                timestamp=now,
+                predicted_1min=25.0,
+                predicted_3min=25.0,
+                predicted_5min=25.0,
+                lower_bound_5min=20.0,
+                upper_bound_5min=30.0,
+                uncertainty=10.0,
+                model_loaded=True,
+                features_available=False,
+            )
+            print("Not enough traffic data yet, using defaults")
+            return
+
+        try:
+            # Build DataFrame from traffic history
+            df_data = []
+            for row in traffic_history:
+                # Find timestamp column
+                timestamp_value = None
+                for key in row.keys():
+                    if 'time' in key.lower():
+                        timestamp_value = row[key]
+                        break
+                
+                if timestamp_value is None:
+                    continue
+                    
+                # Convert to datetime if it's a float (unix timestamp)
+                if isinstance(timestamp_value, (int, float)):
+                    ts = datetime.fromtimestamp(timestamp_value)
+                else:
+                    # Already a datetime object
+                    ts = timestamp_value
+                    if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
+                        ts = ts.replace(tzinfo=None)
+                
+                df_data.append({
+                    'ds': ts,
+                    'y': float(row['request_count'])
+                })
+            
+            if len(df_data) < 3:
+                print("Not enough valid data points for Prophet")
+                raise ValueError("Insufficient data")
+            
+            df = pd.DataFrame(df_data)
+            
+            # Train Prophet model
+            model = Prophet(
+                daily_seasonality=False,
+                weekly_seasonality=False,
+                yearly_seasonality=False,
+                interval_width=0.8
+            )
+            model.fit(df)
+            
+            # Create future dataframe
+            future = model.make_future_dataframe(periods=5, freq='min')
+            forecast = model.predict(future)
+            
+            # Extract predictions
+            pred_1min = forecast['yhat'].iloc[-5]
+            pred_3min = forecast['yhat'].iloc[-3]
+            pred_5min = forecast['yhat'].iloc[-1]
+            lower_5min = forecast['yhat_lower'].iloc[-1]
+            upper_5min = forecast['yhat_upper'].iloc[-1]
+            uncertainty = (upper_5min - lower_5min) / 2
+            
+            now = datetime.now()
+            self.current_prediction = TrafficPrediction(
+                timestamp=now,
+                predicted_1min=max(0, pred_1min),
+                predicted_3min=max(0, pred_3min),
+                predicted_5min=max(0, pred_5min),
+                lower_bound_5min=max(0, lower_5min),
+                upper_bound_5min=max(0, upper_5min),
+                uncertainty=max(0, uncertainty),
+                features_available=True,
+            )
+            
+            print(f"Prophet prediction: {pred_5min:.1f} req/min in 5min (±{uncertainty:.1f})")
+            
+        except Exception as e:
+            print(f"Prophet fit error: {e}")
+            # Fallback to defaults
+            now = datetime.now()
+            self.current_prediction = TrafficPrediction(
+                timestamp=now,
+                predicted_1min=25.0,
+                predicted_3min=25.0,
+                predicted_5min=25.0,
+                lower_bound_5min=20.0,
+                upper_bound_5min=30.0,
+                uncertainty=10.0,
+                model_loaded=True,
+                features_available=False,
+            )
+            return
+        
+        # Keep last 60 predictions
+        self.prediction_history.append(self.current_prediction)
+        if len(self.prediction_history) > 60:
+            self.prediction_history.pop(0)
+            
     # Basic accessors
     def get_current_prediction(self) -> Optional[TrafficPrediction]:
         return self.current_prediction

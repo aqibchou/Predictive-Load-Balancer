@@ -3,6 +3,11 @@ FROM python:3.9-slim
 # Set working directory to the app
 WORKDIR /app
 
+# Install docker-compose
+RUN apt-get update && \
+    apt-get install -y docker-compose && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install requirements 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

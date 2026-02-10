@@ -8,25 +8,28 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
 
+import subprocess
+import time
 
 # Q-Learning hyperparameters
-LEARNING_RATE = 0.1          # α - how fast we learn from new experiences
-DISCOUNT_FACTOR = 0.95       # γ - how much we value future rewards
-EPSILON_START = 1.0          # Initial exploration rate (100% random)
-EPSILON_MIN = 0.1            # Minimum exploration rate (10% random)
-EPSILON_DECAY = 0.995        # How fast exploration decreases
+LEARNING_RATE = 0.1
+DISCOUNT_FACTOR = 0.95
+EPSILON_START = 1.0
+EPSILON_MIN = 0.1
+EPSILON_DECAY = 0.995
 
 # Scaling constraints
 MIN_SERVERS = 1
 MAX_SERVERS = 5
-SCALE_COOLDOWN_SECONDS = 60  # Prevent thrashing
+SCALE_COOLDOWN_SECONDS = 60
+last_scale_time = {}
 
 # Reward weights
 LATENCY_CRITICAL_PENALTY = -10
 LATENCY_WARNING_PENALTY = -5
 SERVER_COST_PENALTY = -0.5
 SLA_BONUS = 5
-ACTION_PENALTY = -1          # Penalty for not holding (prevents thrashing)
+ACTION_PENALTY = -1
 
 
 class Action(Enum):
@@ -36,33 +39,31 @@ class Action(Enum):
 
 
 class LoadLevel(Enum):
-    LOW = "low"           # < 30%
-    MEDIUM = "medium"     # 30-70%
-    HIGH = "high"         # > 70%
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 class PredictionTrend(Enum):
-    DECREASING = "decreasing"  # Predicted < current
-    STABLE = "stable"          # Predicted ≈ current (±10%)
-    INCREASING = "increasing"  # Predicted > current
+    DECREASING = "decreasing"
+    STABLE = "stable"
+    INCREASING = "increasing"
 
 
 class LatencyStatus(Enum):
-    OK = "ok"             # < 100ms
-    WARNING = "warning"   # 100-200ms
-    CRITICAL = "critical" # > 200ms
+    OK = "ok"
+    WARNING = "warning"
+    CRITICAL = "critical"
 
 
 @dataclass
 class SystemState:
-    """Discretized system state for Q-table lookup"""
     current_servers: int
     load_level: LoadLevel
     prediction_trend: PredictionTrend
     latency_status: LatencyStatus
     
     def to_tuple(self) -> Tuple:
-        """Convert to hashable tuple for Q-table key"""
         return (
             self.current_servers,
             self.load_level.value,
@@ -73,7 +74,6 @@ class SystemState:
 
 @dataclass
 class RawMetrics:
-    """Raw metrics before discretization"""
     current_servers: int
     avg_load_percent: float
     predicted_load_5min: float
@@ -82,26 +82,61 @@ class RawMetrics:
     prediction_uncertainty: float
 
 
+def execute_scaling_action(action: Action, current_count: int) -> int:
+    """Execute actual Docker scaling command"""
+    if action == Action.SCALE_UP:
+        new_count = min(current_count + 1, MAX_SERVERS)
+    elif action == Action.SCALE_DOWN:
+        new_count = max(current_count - 1, MIN_SERVERS)
+    else:
+        return current_count
+    
+    if new_count == current_count:
+        return current_count
+    
+    try:
+        result = subprocess.run(
+            [
+                "docker-compose",
+                "-f", "/mnt/project/docker-compose.yml",
+                "-p", "project-group-101",
+                "up", "-d",
+                "--scale", f"backend={new_count}",  # Changed from backend_1 to backend
+                "--no-recreate"
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            print(f"Successfully scaled to {new_count} servers")
+            return new_count
+        else:
+            print(f"Scale {'up' if action == Action.SCALE_UP else 'down'} failed: {result.stderr}")
+            return current_count
+            
+    except Exception as e:
+        print(f"Scale {'up' if action == Action.SCALE_UP else 'down'} failed: {e}")
+        return current_count
+    
 class QLearningScaler:
     def __init__(self):
-        # Q-table: maps (state, action) -> expected reward
         self.q_table: Dict[Tuple, Dict[Action, float]] = defaultdict(
             lambda: {action: 0.0 for action in Action}
         )
         
         self.epsilon = EPSILON_START
-        self.current_servers = 3  # Starting server count
+        self.current_servers = 3
         self.last_scale_time: Optional[datetime] = None
         self.is_running = False
         self._task: Optional[asyncio.Task] = None
         
-        # Decision history for analysis
         self.decision_history: List[Dict] = []
         self.last_state: Optional[SystemState] = None
         self.last_action: Optional[Action] = None
     
     def discretize_load(self, load_percent: float) -> LoadLevel:
-        """Convert continuous load to discrete level"""
         if load_percent < 30:
             return LoadLevel.LOW
         elif load_percent < 70:
@@ -110,7 +145,6 @@ class QLearningScaler:
             return LoadLevel.HIGH
     
     def discretize_trend(self, predicted: float, current: float) -> PredictionTrend:
-        """Compare prediction to current traffic"""
         if current == 0:
             return PredictionTrend.STABLE
         
@@ -124,7 +158,6 @@ class QLearningScaler:
             return PredictionTrend.STABLE
     
     def discretize_latency(self, p95_latency_ms: float) -> LatencyStatus:
-        """Convert latency to status level"""
         if p95_latency_ms < 100:
             return LatencyStatus.OK
         elif p95_latency_ms < 200:
@@ -133,7 +166,6 @@ class QLearningScaler:
             return LatencyStatus.CRITICAL
     
     def get_state(self, metrics: RawMetrics) -> SystemState:
-        """Convert raw metrics to discretized state"""
         return SystemState(
             current_servers=metrics.current_servers,
             load_level=self.discretize_load(metrics.avg_load_percent),
@@ -151,54 +183,42 @@ class QLearningScaler:
         state_after: SystemState,
         metrics_after: RawMetrics
     ) -> float:
-        """Calculate reward based on outcomes"""
         reward = 0.0
         
-        # Latency penalties
         if state_after.latency_status == LatencyStatus.CRITICAL:
             reward += LATENCY_CRITICAL_PENALTY
         elif state_after.latency_status == LatencyStatus.WARNING:
             reward += LATENCY_WARNING_PENALTY
         
-        # Server cost penalty (more servers = more cost)
         reward += state_after.current_servers * SERVER_COST_PENALTY
         
-        # SLA bonus: low latency with minimal servers
         if (state_after.latency_status == LatencyStatus.OK and 
             state_after.current_servers <= 3):
             reward += SLA_BONUS
         
-        # Action penalty to prevent thrashing
         if action != Action.HOLD:
             reward += ACTION_PENALTY
         
         return reward
     
     def select_action(self, state: SystemState) -> Action:
-        """Epsilon-greedy action selection"""
-        # Check cooldown
         if self.last_scale_time:
             time_since_scale = (datetime.now() - self.last_scale_time).total_seconds()
             if time_since_scale < SCALE_COOLDOWN_SECONDS:
                 return Action.HOLD
         
-        # Check constraints
         valid_actions = list(Action)
         if self.current_servers >= MAX_SERVERS:
             valid_actions.remove(Action.SCALE_UP)
         if self.current_servers <= MIN_SERVERS:
             valid_actions.remove(Action.SCALE_DOWN)
         
-        # Epsilon-greedy: explore vs exploit
         if random.random() < self.epsilon:
-            # Explore: random action
             return random.choice(valid_actions)
         else:
-            # Exploit: best known action
             state_key = state.to_tuple()
             q_values = self.q_table[state_key]
             
-            # Filter to valid actions and find best
             valid_q = {}
             for a in valid_actions:
                 valid_q[a] = q_values[a]
@@ -212,50 +232,35 @@ class QLearningScaler:
         reward: float,
         next_state: SystemState
     ):
-        """Q-Learning update rule"""
         state_key = state.to_tuple()
         next_state_key = next_state.to_tuple()
         
-        # Current Q-value
         current_q = self.q_table[state_key][action]
-        
-        # Best Q-value for next state
         max_next_q = max(self.q_table[next_state_key].values())
         
-        # Q-Learning formula
         new_q = current_q + LEARNING_RATE * (
             reward + DISCOUNT_FACTOR * max_next_q - current_q
         )
         
         self.q_table[state_key][action] = new_q
-        
-        # Decay exploration rate
         self.epsilon = max(EPSILON_MIN, self.epsilon * EPSILON_DECAY)
     
     def execute_action(self, action: Action) -> bool:
-        """Execute scaling action (returns True if action taken)"""
         if action == Action.HOLD:
             return False
         
-        if action == Action.SCALE_UP and self.current_servers < MAX_SERVERS:
-            self.current_servers += 1
-            self.last_scale_time = datetime.now()
-            print(f"SCALE UP: Now running {self.current_servers} servers")
-            return True
+        new_server_count = execute_scaling_action(action, self.current_servers)
         
-        if action == Action.SCALE_DOWN and self.current_servers > MIN_SERVERS:
-            self.current_servers -= 1
+        if new_server_count != self.current_servers:
+            self.current_servers = new_server_count
             self.last_scale_time = datetime.now()
-            print(f"SCALE DOWN: Now running {self.current_servers} servers")
             return True
         
         return False
     
     def make_decision(self, metrics: RawMetrics) -> Dict:
-        """Main entry point: observe state, decide action, learn from past"""
         current_state = self.get_state(metrics)
         
-        # Learn from previous decision
         if self.last_state and self.last_action:
             reward = self.calculate_reward(
                 self.last_state, 
@@ -270,15 +275,12 @@ class QLearningScaler:
                 current_state
             )
         
-        # Select and execute action
         action = self.select_action(current_state)
         action_taken = self.execute_action(action)
         
-        # Store for next iteration
         self.last_state = current_state
         self.last_action = action
         
-        # Log decision
         decision = {
             "timestamp": datetime.now().isoformat(),
             "state": {
@@ -304,7 +306,6 @@ class QLearningScaler:
         return decision
     
     def get_q_table_summary(self) -> Dict:
-        """Return Q-table for debugging"""
         summary = {}
         for state_key, actions in self.q_table.items():
             state_str = f"servers={state_key[0]},load={state_key[1]},trend={state_key[2]},latency={state_key[3]}"
@@ -312,7 +313,6 @@ class QLearningScaler:
         return summary
     
     def save_model(self, path: str):
-        """Save Q-table to disk"""
         with open(path, 'wb') as f:
             pickle.dump({
                 'q_table': dict(self.q_table),
@@ -322,7 +322,6 @@ class QLearningScaler:
         print(f"Q-table saved to {path}")
     
     def load_model(self, path: str) -> bool:
-        """Load Q-table from disk"""
         try:
             with open(path, 'rb') as f:
                 data = pickle.load(f)
@@ -339,5 +338,4 @@ class QLearningScaler:
             return False
 
 
-# Global scaler instance
 scaler = QLearningScaler()
