@@ -30,12 +30,12 @@ services:
       - backend
     volumes:
       - ./config/servers.yaml:/app/config/servers.yaml:ro
-      - /var/run/docker.sock:/var/run/docker.sock  
+      - /var/run/docker.sock:/var/run/docker.sock
       - .:/mnt/project:ro
     networks:
       - loadbalancer_net
 
-  # Scalable backend service (replaces backend_1, backend_2, backend_3)
+  # Scalable backend service
   backend:
     build: ./backend
     environment:
@@ -48,9 +48,43 @@ services:
       timeout: 5s
       retries: 3
 
+  # Scrapes metrics from load balancer every 5 seconds
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    depends_on:
+      - load_balancer
+    networks:
+      - loadbalancer_net
+
+  # Dashboard UI - reads from prometheus
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks:
+      - loadbalancer_net
+
 networks:
   loadbalancer_net:
     driver: bridge
 
 volumes:
   postgres_data:
+  grafana-data:
