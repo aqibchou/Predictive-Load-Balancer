@@ -154,8 +154,8 @@ async def debug_routing(path: str):
         "server_scores": router.get_routing_decision_info(path)
     }
 
-# Code used when running compare_routing.py 
-'''# Switch routing mode at runtime 
+# Code used when running compare_routing.py
+'''# Switch routing mode at runtime
 @app.post("/routing/mode/{mode}")
 async def set_routing_mode(mode: str):
     global routing_mode
@@ -204,6 +204,24 @@ async def get_scaling_status():
 async def get_q_table():
     return scaler.get_q_table_summary()
 
+# Code used when running full reactive vs predictive comparison
+"""
+class ScalingOverride(BaseModel):
+    fixed_servers: Optional[int] = None
+
+@app.post("/scaling/override")
+async def set_scaling_override(body: ScalingOverride):
+    global scaling_override
+    scaling_override = body.fixed_servers
+    if scaling_override is not None:
+        scaler.current_servers = scaling_override
+        active_servers.set(scaling_override)
+        print(f"Scaling locked to {scaling_override} servers")
+    else:
+        print("Scaling override removed, Q-learning resumed")
+    return {"fixed_servers": scaling_override}
+"""
+
 @app.get("/metrics")
 async def metrics():
     return Response(content=get_metrics(), media_type="text/plain")
@@ -239,7 +257,7 @@ async def run_scaling_decision():
         prediction_uncertainty=uncertainty
     )
 
-    decision = scaler.make_decision(metrics_data)
+    decision = scaler.make_decision(metrics_data, router=router)
 
     scaling_actions.labels(action=decision['action']).inc()
     qlearning_epsilon.set(scaler.epsilon)
@@ -256,7 +274,7 @@ async def run_scaling_decision():
 @app.get("/{path:path}")
 async def route_request(path: str):
     start_time = time.time()
-    
+
     # Code used when running compare_routing.py (performance testing against round robin)
     '''# Select server based on current routing mode
     if routing_mode == "astar":
@@ -282,8 +300,8 @@ async def route_request(path: str):
 
     else:
         raise HTTPException(status_code=500, detail="Unknown routing mode")'''
-    
-    # If no comparative test being done, use main A* routing instead 
+
+    # If no comparative test being done, use main A* routing instead
     server_state = await router.select_server(path)
     if server_state is None:
         raise HTTPException(status_code=503, detail="No backend servers available")

@@ -62,13 +62,13 @@ class SystemState:
     load_level: LoadLevel
     prediction_trend: PredictionTrend
     latency_status: LatencyStatus
-    
+
     def to_tuple(self) -> Tuple:
         return (
             self.current_servers,
             self.load_level.value,
             self.prediction_trend.value,
-            self.latency_status.value
+            self.latency_status.value,
         )
 
 
@@ -90,52 +90,61 @@ def execute_scaling_action(action: Action, current_count: int) -> int:
         new_count = max(current_count - 1, MIN_SERVERS)
     else:
         return current_count
-    
+
     if new_count == current_count:
         return current_count
-    
+
     try:
         result = subprocess.run(
             [
                 "docker-compose",
-                "-f", "/mnt/project/docker-compose.yml",
-                "-p", "project-group-101",
-                "up", "-d",
-                "--scale", f"backend={new_count}",  # Changed from backend_1 to backend
-                "--no-recreate"
+                "-f",
+                "/mnt/project/docker-compose.yml",
+                "-p",
+                "project-group-101",
+                "up",
+                "-d",
+                "--scale",
+                f"backend={new_count}",
+                "--no-recreate",
             ],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=30,
         )
-        
+
         if result.returncode == 0:
             print(f"Successfully scaled to {new_count} servers")
             return new_count
         else:
-            print(f"Scale {'up' if action == Action.SCALE_UP else 'down'} failed: {result.stderr}")
+            print(
+                f"Scale {'up' if action == Action.SCALE_UP else 'down'} failed: {result.stderr}"
+            )
             return current_count
-            
+
     except Exception as e:
-        print(f"Scale {'up' if action == Action.SCALE_UP else 'down'} failed: {e}")
+        print(
+            f"Scale {'up' if action == Action.SCALE_UP else 'down'} failed: {e}"
+        )
         return current_count
-    
+
+
 class QLearningScaler:
     def __init__(self):
         self.q_table: Dict[Tuple, Dict[Action, float]] = defaultdict(
             lambda: {action: 0.0 for action in Action}
         )
-        
+
         self.epsilon = EPSILON_START
         self.current_servers = 3
         self.last_scale_time: Optional[datetime] = None
         self.is_running = False
         self._task: Optional[asyncio.Task] = None
-        
+
         self.decision_history: List[Dict] = []
         self.last_state: Optional[SystemState] = None
         self.last_action: Optional[Action] = None
-    
+
     def discretize_load(self, load_percent: float) -> LoadLevel:
         if load_percent < 30:
             return LoadLevel.LOW
@@ -143,194 +152,247 @@ class QLearningScaler:
             return LoadLevel.MEDIUM
         else:
             return LoadLevel.HIGH
-    
-    def discretize_trend(self, predicted: float, current: float) -> PredictionTrend:
+
+    def discretize_trend(
+        self, predicted: float, current: float
+    ) -> PredictionTrend:
         if current == 0:
             return PredictionTrend.STABLE
-        
+
         change_percent = (predicted - current) / current * 100
-        
+
         if change_percent < -10:
             return PredictionTrend.DECREASING
         elif change_percent > 10:
             return PredictionTrend.INCREASING
         else:
             return PredictionTrend.STABLE
-    
-    def discretize_latency(self, p95_latency_ms: float) -> LatencyStatus:
+
+    def discretize_latency(
+        self, p95_latency_ms: float
+    ) -> LatencyStatus:
         if p95_latency_ms < 100:
             return LatencyStatus.OK
         elif p95_latency_ms < 200:
             return LatencyStatus.WARNING
         else:
             return LatencyStatus.CRITICAL
-    
+
     def get_state(self, metrics: RawMetrics) -> SystemState:
         return SystemState(
             current_servers=metrics.current_servers,
             load_level=self.discretize_load(metrics.avg_load_percent),
             prediction_trend=self.discretize_trend(
-                metrics.predicted_load_5min, 
-                metrics.current_load
+                metrics.predicted_load_5min,
+                metrics.current_load,
             ),
-            latency_status=self.discretize_latency(metrics.p95_latency_ms)
+            latency_status=self.discretize_latency(
+                metrics.p95_latency_ms
+            ),
         )
-    
+
     def calculate_reward(
-        self, 
-        state_before: SystemState, 
-        action: Action, 
+        self,
+        state_before: SystemState,
+        action: Action,
         state_after: SystemState,
-        metrics_after: RawMetrics
+        metrics_after: RawMetrics,
     ) -> float:
         reward = 0.0
-        
+
         if state_after.latency_status == LatencyStatus.CRITICAL:
             reward += LATENCY_CRITICAL_PENALTY
         elif state_after.latency_status == LatencyStatus.WARNING:
             reward += LATENCY_WARNING_PENALTY
-        
+
         reward += state_after.current_servers * SERVER_COST_PENALTY
-        
-        if (state_after.latency_status == LatencyStatus.OK and 
-            state_after.current_servers <= 3):
+
+        if (
+            state_after.latency_status == LatencyStatus.OK
+            and state_after.current_servers <= 3
+        ):
             reward += SLA_BONUS
-        
+
         if action != Action.HOLD:
             reward += ACTION_PENALTY
-        
+
         return reward
-    
+
     def select_action(self, state: SystemState) -> Action:
         if self.last_scale_time:
-            time_since_scale = (datetime.now() - self.last_scale_time).total_seconds()
+            time_since_scale = (
+                datetime.now() - self.last_scale_time
+            ).total_seconds()
             if time_since_scale < SCALE_COOLDOWN_SECONDS:
                 return Action.HOLD
-        
+
         valid_actions = list(Action)
+
         if self.current_servers >= MAX_SERVERS:
             valid_actions.remove(Action.SCALE_UP)
         if self.current_servers <= MIN_SERVERS:
             valid_actions.remove(Action.SCALE_DOWN)
-        
+
         if random.random() < self.epsilon:
             return random.choice(valid_actions)
         else:
             state_key = state.to_tuple()
             q_values = self.q_table[state_key]
-            
-            valid_q = {}
-            for a in valid_actions:
-                valid_q[a] = q_values[a]
 
+            valid_q = {a: q_values[a] for a in valid_actions}
             return max(valid_q, key=valid_q.get)
-    
+
     def update_q_table(
         self,
         state: SystemState,
         action: Action,
         reward: float,
-        next_state: SystemState
+        next_state: SystemState,
     ):
         state_key = state.to_tuple()
         next_state_key = next_state.to_tuple()
-        
+
         current_q = self.q_table[state_key][action]
-        max_next_q = max(self.q_table[next_state_key].values())
-        
+        max_next_q = max(
+            self.q_table[next_state_key].values()
+        )
+
         new_q = current_q + LEARNING_RATE * (
             reward + DISCOUNT_FACTOR * max_next_q - current_q
         )
-        
+
         self.q_table[state_key][action] = new_q
-        self.epsilon = max(EPSILON_MIN, self.epsilon * EPSILON_DECAY)
-    
-    def execute_action(self, action: Action) -> bool:
+        self.epsilon = max(
+            EPSILON_MIN, self.epsilon * EPSILON_DECAY
+        )
+
+    def execute_action(self, action: Action, router=None) -> bool:
         if action == Action.HOLD:
             return False
-        
-        new_server_count = execute_scaling_action(action, self.current_servers)
-        
+
+        old_count = self.current_servers
+        new_server_count = execute_scaling_action(
+            action, self.current_servers
+        )
+
         if new_server_count != self.current_servers:
             self.current_servers = new_server_count
             self.last_scale_time = datetime.now()
+
+            if router is not None:
+                if action == Action.SCALE_UP:
+                    server_id = f"backend-{new_server_count}"
+                    server_url = (
+                        f"http://project-group-101-backend-{new_server_count}:8000"
+                    )
+                    router.register_server(server_id, server_url)
+                    print(f"Registered {server_id} with router")
+
+                elif action == Action.SCALE_DOWN:
+                    server_id = f"backend-{old_count}"
+                    if server_id in router.servers:
+                        del router.servers[server_id]
+                        print(
+                            f"Deregistered {server_id} from router"
+                        )
+
             return True
-        
+
         return False
-    
-    def make_decision(self, metrics: RawMetrics) -> Dict:
+
+    def make_decision(self, metrics: RawMetrics, router=None) -> Dict:
         current_state = self.get_state(metrics)
-        
+
         if self.last_state and self.last_action:
             reward = self.calculate_reward(
-                self.last_state, 
-                self.last_action, 
+                self.last_state,
+                self.last_action,
                 current_state,
-                metrics
+                metrics,
             )
             self.update_q_table(
-                self.last_state, 
-                self.last_action, 
-                reward, 
-                current_state
+                self.last_state,
+                self.last_action,
+                reward,
+                current_state,
             )
-        
+
         action = self.select_action(current_state)
-        action_taken = self.execute_action(action)
-        
+        action_taken = self.execute_action(action, router=router)
+
         self.last_state = current_state
         self.last_action = action
-        
+
         decision = {
             "timestamp": datetime.now().isoformat(),
             "state": {
                 "servers": current_state.current_servers,
                 "load": current_state.load_level.value,
                 "trend": current_state.prediction_trend.value,
-                "latency": current_state.latency_status.value
+                "latency": current_state.latency_status.value,
             },
             "action": action.value,
             "action_taken": action_taken,
             "epsilon": round(self.epsilon, 3),
             "metrics": {
                 "avg_load": round(metrics.avg_load_percent, 1),
-                "predicted": round(metrics.predicted_load_5min, 1),
-                "p95_latency": round(metrics.p95_latency_ms, 1)
-            }
+                "predicted": round(
+                    metrics.predicted_load_5min, 1
+                ),
+                "p95_latency": round(
+                    metrics.p95_latency_ms, 1
+                ),
+            },
         }
-        
+
         self.decision_history.append(decision)
         if len(self.decision_history) > 100:
             self.decision_history = self.decision_history[-100:]
-        
+
         return decision
-    
+
     def get_q_table_summary(self) -> Dict:
         summary = {}
+
         for state_key, actions in self.q_table.items():
-            state_str = f"servers={state_key[0]},load={state_key[1]},trend={state_key[2]},latency={state_key[3]}"
-            summary[state_str] = {a.value: round(v, 2) for a, v in actions.items()}
+            state_str = (
+                f"servers={state_key[0]},"
+                f"load={state_key[1]},"
+                f"trend={state_key[2]},"
+                f"latency={state_key[3]}"
+            )
+            summary[state_str] = {
+                a.value: round(v, 2)
+                for a, v in actions.items()
+            }
+
         return summary
-    
+
     def save_model(self, path: str):
-        with open(path, 'wb') as f:
-            pickle.dump({
-                'q_table': dict(self.q_table),
-                'epsilon': self.epsilon,
-                'current_servers': self.current_servers
-            }, f)
+        with open(path, "wb") as f:
+            pickle.dump(
+                {
+                    "q_table": dict(self.q_table),
+                    "epsilon": self.epsilon,
+                    "current_servers": self.current_servers,
+                },
+                f,
+            )
         print(f"Q-table saved to {path}")
-    
+
     def load_model(self, path: str) -> bool:
         try:
-            with open(path, 'rb') as f:
+            with open(path, "rb") as f:
                 data = pickle.load(f)
+
                 self.q_table = defaultdict(
                     lambda: {action: 0.0 for action in Action},
-                    data['q_table']
+                    data["q_table"],
                 )
-                self.epsilon = data['epsilon']
-                self.current_servers = data['current_servers']
+
+                self.epsilon = data["epsilon"]
+                self.current_servers = data["current_servers"]
+
             print(f"Q-table loaded from {path}")
             return True
         except FileNotFoundError:
