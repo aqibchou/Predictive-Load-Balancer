@@ -32,20 +32,21 @@ app = FastAPI()
 # Configuration
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/app/config/servers.yaml")
 
+# Routing mode: "round_robin", "greedy", "astar"
+routing_mode = "astar"
+
 # Global state
 class LoadBalancerState:
     def __init__(self):
-        self.servers: List[Dict[str, str]] = []  # List of backend servers from config
-        self.current_index = 0  # round robin distribution
+        self.servers: List[Dict[str, str]] = []
+        self.current_index = 0
         self.total_requests = 0
-        self.server_request_counts: Dict[str, int] = {}  # How many requests each server has handled
+        self.server_request_counts: Dict[str, int] = {}
         self.start_time = datetime.now()
 
-    # Round-robin logic for distributed systems
     def get_next_server(self) -> Dict[str, str]:
         if not self.servers:
             raise HTTPException(status_code=503, detail="No backend servers available")
-
         server = self.servers[self.current_index]
         self.current_index = (self.current_index + 1) % len(self.servers)
         return server
@@ -86,8 +87,6 @@ class PredictionResponse(BaseModel):
     uncertainty: float
     model_loaded: bool
 
-# Load server configuration
-# Reads from servers.yaml
 def load_server_config():
     try:
         with open(CONFIG_PATH, 'r') as f:
@@ -96,8 +95,6 @@ def load_server_config():
             for server in state.servers:
                 state.server_request_counts[server['id']] = 0
             print(f"Loaded {len(state.servers)} servers from config")
-
-    # Should not happen, but just in case
     except FileNotFoundError:
         print(f"Config file not found: {CONFIG_PATH}")
         state.servers = []
@@ -105,34 +102,28 @@ def load_server_config():
         print(f"Error loading config: {e}")
         state.servers = []
 
-# fastAPI
-# Runs when fast api starts (before any requests are sent)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: runs once when app starts
     load_server_config()
     await init_database()
 
     for server in state.servers:
         router.register_server(server['id'], server['url'])
 
-    # Load the model
     prediction_service.load_model()
     await prediction_service.start()
 
-    # Set initial active server count
     active_servers.set(len(state.servers))
 
-    # Start scaling loop
     async def scaling_loop():
-        await asyncio.sleep(30)  # Wait for system to stabilize
+        await asyncio.sleep(30)
         while True:
             try:
                 decision = await run_scaling_decision()
                 print(f"Scaling decision: {decision['action']} (e={decision['epsilon']})")
             except Exception as e:
                 print(f"Scaling error: {e}")
-            await asyncio.sleep(60)  # Run every 60 seconds
+            await asyncio.sleep(60)
 
     scaling_task = asyncio.create_task(scaling_loop())
 
@@ -146,9 +137,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# System statistics
-# Shows distribution across servers
-# Shows routing algo (round robin to start)
 @app.get("/stats")
 async def get_stats():
     return StatsResponse(
@@ -156,10 +144,9 @@ async def get_stats():
         uptime_seconds=state.get_uptime_seconds(),
         num_servers=len(state.servers),
         requests_per_server=state.server_request_counts,
-        routing_algorithm="a-star"  # deprecated round robin to use A*
+        routing_algorithm=routing_mode
     )
 
-# Debugging purposes
 @app.get("/routing/debug/{path:path}")
 async def debug_routing(path: str):
     return {
@@ -167,6 +154,21 @@ async def debug_routing(path: str):
         "server_scores": router.get_routing_decision_info(path)
     }
 
+# Code used when running compare_routing.py 
+'''# Switch routing mode at runtime 
+@app.post("/routing/mode/{mode}")
+async def set_routing_mode(mode: str):
+    global routing_mode
+    if mode not in ["round_robin", "greedy", "astar"]:
+        raise HTTPException(status_code=400, detail="Invalid mode. Use: round_robin, greedy, astar")
+    routing_mode = mode
+    print(f"Routing mode switched to: {mode}")
+    return {"routing_mode": routing_mode}
+
+@app.get("/routing/mode")
+async def get_routing_mode():
+    return {"routing_mode": routing_mode}
+'''
 @app.get("/health")
 async def health_check():
     return {
@@ -189,7 +191,6 @@ async def get_prediction_history():
         "predictions": [p.to_dict() for p in prediction_service.prediction_history[-10:]]
     }
 
-# Q-learning endpoints
 @app.get("/scaling/status")
 async def get_scaling_status():
     return {
@@ -203,21 +204,17 @@ async def get_scaling_status():
 async def get_q_table():
     return scaler.get_q_table_summary()
 
-# Prometheus metrics endpoint
 @app.get("/metrics")
 async def metrics():
     return Response(content=get_metrics(), media_type="text/plain")
 
 async def run_scaling_decision():
-    # Collect metrics and make scaling decision
     from routing import router
 
-    # Get prediction from Prophet
     pred = prediction_service.get_current_prediction()
     predicted_load = pred.predicted_5min if pred else 0
     uncertainty = pred.uncertainty if pred else 0
 
-    # Get current load from router state
     total_active = 0
     for s in router.servers.values():
         total_active += s.active_requests
@@ -225,7 +222,6 @@ async def run_scaling_decision():
     num_servers = len(router.servers)
     avg_load = (total_active / num_servers * 100) if num_servers > 0 else 0
 
-    # Get latency from recent requests (simplified - use avg response time)
     if num_servers > 0:
         total_latency = 0
         for s in router.servers.values():
@@ -245,12 +241,10 @@ async def run_scaling_decision():
 
     decision = scaler.make_decision(metrics_data)
 
-    # Record Q-learning metrics
     scaling_actions.labels(action=decision['action']).inc()
     qlearning_epsilon.set(scaler.epsilon)
     active_servers.set(scaler.current_servers)
 
-    # Record Prophet prediction metrics
     if pred:
         predicted_traffic.set(pred.predicted_5min)
         prediction_confidence_lower.set(pred.lower_bound_5min)
@@ -258,15 +252,41 @@ async def run_scaling_decision():
 
     return decision
 
-# Main routing logic - A* routing
+# Main routing logic - supports round_robin, greedy, and astar
 @app.get("/{path:path}")
 async def route_request(path: str):
     start_time = time.time()
+    
+    # Code used when running compare_routing.py (performance testing against round robin)
+    '''# Select server based on current routing mode
+    if routing_mode == "astar":
+        server_state = await router.select_server(path)
+        if server_state is None:
+            raise HTTPException(status_code=503, detail="No backend servers available")
+        server_id = server_state.server_id
+        server_url = server_state.url
 
+    elif routing_mode == "round_robin":
+        server = state.get_next_server()
+        server_id = server['id']
+        server_url = server['url']
+
+    elif routing_mode == "greedy":
+        # Always pick server with lowest active requests
+        await router.update_all_servers()
+        if not router.servers:
+            raise HTTPException(status_code=503, detail="No backend servers available")
+        best = min(router.servers.values(), key=lambda s: s.active_requests)
+        server_id = best.server_id
+        server_url = best.url
+
+    else:
+        raise HTTPException(status_code=500, detail="Unknown routing mode")'''
+    
+    # If no comparative test being done, use main A* routing instead 
     server_state = await router.select_server(path)
     if server_state is None:
         raise HTTPException(status_code=503, detail="No backend servers available")
-
     server_id = server_state.server_id
     server_url = server_state.url
 
@@ -284,7 +304,6 @@ async def route_request(path: str):
 
             router.record_request_end(server_id, total_time * 1000, path)
 
-            # Record request metrics
             cached = backend_data.get('cached', False)
             requests_total.labels(backend_server=server_id, status="success").inc()
             request_latency.labels(route=path).observe(total_time)
@@ -294,7 +313,6 @@ async def route_request(path: str):
             else:
                 cache_misses.labels(server=server_id).inc()
 
-            # Record A* scores for this routing decision
             for info in router.get_routing_decision_info(path):
                 astar_server_scores.labels(server=info['server_id']).set(info['score'])
 
