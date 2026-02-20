@@ -2,14 +2,17 @@ import asyncio
 import pickle
 import os
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from collections import defaultdict
 
 import subprocess
-import time
+import json
+
+# Learned Q table with epsilon 0.1
+QTABLE_PATH = "qtable_checkpoint.json"
 
 # Q-Learning hyperparameters
 LEARNING_RATE = 0.1
@@ -22,7 +25,6 @@ EPSILON_DECAY = 0.995
 MIN_SERVERS = 1
 MAX_SERVERS = 5
 SCALE_COOLDOWN_SECONDS = 60
-last_scale_time = {}
 
 # Reward weights
 LATENCY_CRITICAL_PENALTY = -10
@@ -83,7 +85,6 @@ class RawMetrics:
 
 
 def execute_scaling_action(action: Action, current_count: int) -> int:
-    """Execute actual Docker scaling command"""
     if action == Action.SCALE_UP:
         new_count = min(current_count + 1, MAX_SERVERS)
     elif action == Action.SCALE_DOWN:
@@ -117,15 +118,11 @@ def execute_scaling_action(action: Action, current_count: int) -> int:
             print(f"Successfully scaled to {new_count} servers")
             return new_count
         else:
-            print(
-                f"Scale {'up' if action == Action.SCALE_UP else 'down'} failed: {result.stderr}"
-            )
+            print(f"Scale failed: {result.stderr}")
             return current_count
 
     except Exception as e:
-        print(
-            f"Scale {'up' if action == Action.SCALE_UP else 'down'} failed: {e}"
-        )
+        print(f"Scale failed: {e}")
         return current_count
 
 
@@ -145,17 +142,43 @@ class QLearningScaler:
         self.last_state: Optional[SystemState] = None
         self.last_action: Optional[Action] = None
 
+    def save_qtable(self):
+        data = {
+            "qtable": {str(k): v for k, v in self.q_table.items()},
+            "epsilon": self.epsilon,
+        }
+        with open(QTABLE_PATH, "w") as f:
+            json.dump(data, f)
+        print(f"Q-table saved. States: {len(self.q_table)}, epsilon: {self.epsilon:.3f}")
+
+    def load_qtable(self):
+        if os.path.exists(QTABLE_PATH):
+            with open(QTABLE_PATH) as f:
+                data = json.load(f)
+            self.q_table = defaultdict(
+                lambda: {action: 0.0 for action in Action},
+                {eval(k): v for k, v in data["qtable"].items()},
+            )
+            self.epsilon = data["epsilon"]
+            print(f"Q-table loaded. States: {len(self.q_table)}, epsilon: {self.epsilon:.3f}")
+        else:
+            print("No checkpoint found, starting fresh.")
+
+    def reset_qtable(self):
+        self.q_table = defaultdict(
+            lambda: {action: 0.0 for action in Action}
+        )
+        self.epsilon = EPSILON_START
+        print("Q-table reset. Starting from scratch.")
+
     def discretize_load(self, load_percent: float) -> LoadLevel:
         if load_percent < 30:
             return LoadLevel.LOW
         elif load_percent < 70:
             return LoadLevel.MEDIUM
-        else:
-            return LoadLevel.HIGH
+        return LoadLevel.HIGH
 
-    def discretize_trend(
-        self, predicted: float, current: float
-    ) -> PredictionTrend:
+    def discretize_trend(self, predicted: float, current: float) -> PredictionTrend:
         if current == 0:
             return PredictionTrend.STABLE
 
@@ -165,18 +188,14 @@ class QLearningScaler:
             return PredictionTrend.DECREASING
         elif change_percent > 10:
             return PredictionTrend.INCREASING
-        else:
-            return PredictionTrend.STABLE
+        return PredictionTrend.STABLE
 
-    def discretize_latency(
-        self, p95_latency_ms: float
-    ) -> LatencyStatus:
+    def discretize_latency(self, p95_latency_ms: float) -> LatencyStatus:
         if p95_latency_ms < 100:
             return LatencyStatus.OK
         elif p95_latency_ms < 200:
             return LatencyStatus.WARNING
-        else:
-            return LatencyStatus.CRITICAL
+        return LatencyStatus.CRITICAL
 
     def get_state(self, metrics: RawMetrics) -> SystemState:
         return SystemState(
@@ -186,9 +205,7 @@ class QLearningScaler:
                 metrics.predicted_load_5min,
                 metrics.current_load,
             ),
-            latency_status=self.discretize_latency(
-                metrics.p95_latency_ms
-            ),
+            latency_status=self.discretize_latency(metrics.p95_latency_ms),
         )
 
     def calculate_reward(
@@ -235,12 +252,11 @@ class QLearningScaler:
 
         if random.random() < self.epsilon:
             return random.choice(valid_actions)
-        else:
-            state_key = state.to_tuple()
-            q_values = self.q_table[state_key]
 
-            valid_q = {a: q_values[a] for a in valid_actions}
-            return max(valid_q, key=valid_q.get)
+        state_key = state.to_tuple()
+        q_values = self.q_table[state_key]
+        valid_q = {a: q_values[a] for a in valid_actions}
+        return max(valid_q, key=valid_q.get)
 
     def update_q_table(
         self,
@@ -253,52 +269,14 @@ class QLearningScaler:
         next_state_key = next_state.to_tuple()
 
         current_q = self.q_table[state_key][action]
-        max_next_q = max(
-            self.q_table[next_state_key].values()
-        )
+        max_next_q = max(self.q_table[next_state_key].values())
 
         new_q = current_q + LEARNING_RATE * (
             reward + DISCOUNT_FACTOR * max_next_q - current_q
         )
 
         self.q_table[state_key][action] = new_q
-        self.epsilon = max(
-            EPSILON_MIN, self.epsilon * EPSILON_DECAY
-        )
-
-    def execute_action(self, action: Action, router=None) -> bool:
-        if action == Action.HOLD:
-            return False
-
-        old_count = self.current_servers
-        new_server_count = execute_scaling_action(
-            action, self.current_servers
-        )
-
-        if new_server_count != self.current_servers:
-            self.current_servers = new_server_count
-            self.last_scale_time = datetime.now()
-
-            if router is not None:
-                if action == Action.SCALE_UP:
-                    server_id = f"backend-{new_server_count}"
-                    server_url = (
-                        f"http://project-group-101-backend-{new_server_count}:8000"
-                    )
-                    router.register_server(server_id, server_url)
-                    print(f"Registered {server_id} with router")
-
-                elif action == Action.SCALE_DOWN:
-                    server_id = f"backend-{old_count}"
-                    if server_id in router.servers:
-                        del router.servers[server_id]
-                        print(
-                            f"Deregistered {server_id} from router"
-                        )
-
-            return True
-
-        return False
+        self.epsilon = max(EPSILON_MIN, self.epsilon * EPSILON_DECAY)
 
     def make_decision(self, metrics: RawMetrics, router=None) -> Dict:
         current_state = self.get_state(metrics)
@@ -318,7 +296,14 @@ class QLearningScaler:
             )
 
         action = self.select_action(current_state)
-        action_taken = self.execute_action(action, router=router)
+        action_taken = False
+
+        if action != Action.HOLD:
+            new_count = execute_scaling_action(action, self.current_servers)
+            if new_count != self.current_servers:
+                self.current_servers = new_count
+                self.last_scale_time = datetime.now()
+                action_taken = True
 
         self.last_state = current_state
         self.last_action = action
@@ -334,15 +319,6 @@ class QLearningScaler:
             "action": action.value,
             "action_taken": action_taken,
             "epsilon": round(self.epsilon, 3),
-            "metrics": {
-                "avg_load": round(metrics.avg_load_percent, 1),
-                "predicted": round(
-                    metrics.predicted_load_5min, 1
-                ),
-                "p95_latency": round(
-                    metrics.p95_latency_ms, 1
-                ),
-            },
         }
 
         self.decision_history.append(decision)
@@ -350,54 +326,6 @@ class QLearningScaler:
             self.decision_history = self.decision_history[-100:]
 
         return decision
-
-    def get_q_table_summary(self) -> Dict:
-        summary = {}
-
-        for state_key, actions in self.q_table.items():
-            state_str = (
-                f"servers={state_key[0]},"
-                f"load={state_key[1]},"
-                f"trend={state_key[2]},"
-                f"latency={state_key[3]}"
-            )
-            summary[state_str] = {
-                a.value: round(v, 2)
-                for a, v in actions.items()
-            }
-
-        return summary
-
-    def save_model(self, path: str):
-        with open(path, "wb") as f:
-            pickle.dump(
-                {
-                    "q_table": dict(self.q_table),
-                    "epsilon": self.epsilon,
-                    "current_servers": self.current_servers,
-                },
-                f,
-            )
-        print(f"Q-table saved to {path}")
-
-    def load_model(self, path: str) -> bool:
-        try:
-            with open(path, "rb") as f:
-                data = pickle.load(f)
-
-                self.q_table = defaultdict(
-                    lambda: {action: 0.0 for action in Action},
-                    data["q_table"],
-                )
-
-                self.epsilon = data["epsilon"]
-                self.current_servers = data["current_servers"]
-
-            print(f"Q-table loaded from {path}")
-            return True
-        except FileNotFoundError:
-            print(f"No existing Q-table at {path}")
-            return False
 
 
 scaler = QLearningScaler()

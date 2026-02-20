@@ -27,7 +27,6 @@ from metrics import (
     astar_server_scores, cache_hits, cache_misses, get_metrics
 )
 
-app = FastAPI()
 
 # Configuration
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/app/config/servers.yaml")
@@ -136,6 +135,22 @@ async def lifespan(app: FastAPI):
     print("Load Balancer shutdown complete")
 
 app = FastAPI(lifespan=lifespan)
+
+# Load and save Q table for future runs
+@app.post("/scaling/save")
+def save_qtable():
+    scaler.save_qtable()
+    return {"status": "saved", "epsilon": scaler.epsilon, "states": len(scaler.q_table)}
+
+@app.post("/scaling/load")
+def load_qtable():
+    scaler.load_qtable()
+    return {"status": "loaded", "epsilon": scaler.epsilon, "states": len(scaler.q_table)}
+
+@app.post("/scaling/reset")
+def reset_qtable():
+    scaler.reset_qtable()
+    return {"status": "reset", "epsilon": scaler.epsilon}
 
 @app.get("/stats")
 async def get_stats():
