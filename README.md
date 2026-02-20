@@ -4,6 +4,15 @@ A proactive load balancing system that predicts traffic patterns and makes intel
 
 ---
 
+## Results
+
+- A* routing reduced average latency by **34% vs greedy and 6% vs round-robin** across 4 controlled experiments
+- A* achieved the **lowest and most consistent P95 latency (157.5ms) of all three routing algorithms**
+- Prophet forecasting trained on 1.89M NASA HTTP log entries, retraining every 60 seconds in production
+- 99.74% log extraction success rate across 1,891,715 raw HTTP requests
+- Q-learning agent operates across 135-state space making autonomous container scaling decisions
+- Full observability stack with 7 custom Prometheus metrics and real-time Grafana dashboard
+
 ## Overview
 
 Traditional load balancers react to traffic after it arrives. This system predicts traffic 1-5 minutes ahead and scales resources proactively.
