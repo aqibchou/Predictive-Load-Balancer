@@ -22,7 +22,7 @@ The predictive system began outperforming reactive scaling during the varied tra
 Note: this experiment was run with epsilon ~0.7, meaning 70% of Q-learning decisions were still random exploration. The results represent a conservative lower bound on what a fully converged agent achieves.
 
 ### Q-Learning Convergence
-A separate 8-hour convergence test (~35,000 requests, 5 traffic cycles, each with low/ramp-up/spike/ramp-down/recovery phases) tracked how agent behavior evolved as epsilon decayed from 0.98 to 0.1:
+A separate 8-hour convergence test (5 traffic cycles, each with low/ramp-up/spike/ramp-down/recovery phases) tracked how agent behavior evolved as epsilon decayed from 0.98 to 0.1:
 
 | Cycle | Spike Avg | Spike P95 | Epsilon at end | Servers during spike |
 |-------|-----------|-----------|----------------|----------------------|
@@ -373,7 +373,7 @@ The prediction trend from Prophet is one of the four state components, so Q-lear
 
 ---
 
-## Key Findings
+## Performance Summary
 
 **Proactive scaling begins before the spike.** During the varied traffic phase, the predictive system averaged 978ms vs 2168ms for reactive - a 54% improvement before the spike even started. Q-learning was already adding servers because Prophet detected the upward trend.
 
@@ -399,6 +399,8 @@ The prediction trend from Prophet is one of the four state components, so Q-lear
 
 **Q-learning can be checkpointed but does not persist automatically.** The Q-table is saved to disk only when `/scaling/save` is called explicitly. By default the agent starts fresh on each restart. Call `/scaling/load` after startup to resume a previously trained policy, or `/scaling/reset` to wipe and retrain from scratch.
 
+**Initial Prophet models achieved near-perfect R2 due to data leakage.** Lag features inadvertently included current traffic when predicting current traffic. The fix required shifting all lag features by one additional period so predictions at time T only use data from T-1 and earlier. Train/test splits are strictly chronological for the same reason.
+
 ---
 
 ## Dataset
@@ -414,8 +416,6 @@ The prediction trend from Prophet is one of the four state components, so Q-lear
 | Engineered features | 23 |
 
 Train/test split: 80/20 chronological. Shuffling was explicitly avoided to prevent data leakage - a time-series model must never be evaluated on data that precedes its training window.
-
-A critical issue discovered during development: initial models achieved near-perfect R2 scores because lag features inadvertently included current traffic when predicting current traffic. The fix required shifting all lag features by one additional period so that predictions at time T only use data from T-1 and earlier.
 
 ---
 
