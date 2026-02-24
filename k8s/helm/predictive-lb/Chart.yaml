@@ -1,0 +1,18 @@
+apiVersion: v2
+name: predictive-lb
+description: >
+  AI-driven predictive load balancer — BiStacking ensemble forecasting,
+  A* routing with circuit breaker, Q-learning autoscaling, OOA-DPSO-GA
+  feature selection, Redis distributed state, PostgreSQL Q-table persistence.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - load-balancer
+  - machine-learning
+  - kubernetes
+  - lightgbm
+  - q-learning
+home: https://github.com/YOUR_ORG/Predictive-Load-Balancer
+maintainers:
+  - name: Aqib Choudhary

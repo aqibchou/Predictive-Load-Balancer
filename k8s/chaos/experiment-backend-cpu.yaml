@@ -1,0 +1,23 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: backend-cpu-hog
+  namespace: predictive-lb
+  annotations:
+    description: >
+      Pins 90% CPU on all backend pods for 60 s using 4 workers.
+      Expected outcome: BiStacking ensemble detects rising latency →
+      Q-learning scaler chooses SCALE_UP → HPA adds replicas →
+      latency recovers within the chaos window.
+spec:
+  mode: all
+  selector:
+    namespaces:
+      - predictive-lb
+    labelSelectors:
+      app.kubernetes.io/component: backend
+  stressors:
+    cpu:
+      workers: 4
+      load: 90
+  duration: 60s

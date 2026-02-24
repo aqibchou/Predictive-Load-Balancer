@@ -1,0 +1,69 @@
+---
+# ArgoCD AppProject — scopes the application to the predictive-lb namespace
+# and restricts source to this repository, preventing accidental cross-project
+# mutations and enforcing least-privilege cluster access.
+
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: predictive-lb
+  namespace: argocd
+  # Finalizer ensures the project (and its apps) are deleted safely
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "Predictive Load Balancer — BiStacking + Q-learning + A* routing"
+
+  # ── Allowed source repositories ──────────────────────────────────────────────
+  sourceRepos:
+    - https://github.com/YOUR_ORG/Predictive-Load-Balancer.git
+
+  # ── Allowed destination clusters and namespaces ──────────────────────────────
+  destinations:
+    - server: https://kubernetes.default.svc   # in-cluster
+      namespace: predictive-lb
+    - server: https://kubernetes.default.svc
+      namespace: argocd                         # ArgoCD-managed CRDs (AnalysisTemplate)
+
+  # ── Allowed resource kinds ───────────────────────────────────────────────────
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  namespaceResourceWhitelist:
+    # Core workloads
+    - group: "apps"
+      kind: Deployment
+    - group: "apps"
+      kind: ReplicaSet
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: ServiceAccount
+    # Argo Rollouts
+    - group: "argoproj.io"
+      kind: Rollout
+    - group: "argoproj.io"
+      kind: AnalysisTemplate
+    - group: "argoproj.io"
+      kind: AnalysisRun
+    # Autoscaling
+    - group: "autoscaling"
+      kind: HorizontalPodAutoscaler
+    # Storage
+    - group: ""
+      kind: PersistentVolumeClaim
+    - group: ""
+      kind: Secret
+
+  # ── Sync windows — block accidental deploys during business hours ─────────────
+  # (Optional — remove if you want unrestricted syncs)
+  syncWindows:
+    - kind: allow
+      schedule: "0 0 * * *"    # midnight UTC daily
+      duration: 24h
+      applications:
+        - "*"
+      manualSync: true          # always allow manual emergency deploys

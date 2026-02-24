@@ -20,28 +20,55 @@ services:
       timeout: 5s
       retries: 5
 
+  # Opt 9: Redis for distributed ServerState and atomic active-request counting
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - loadbalancer_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   # Load balancer
   load_balancer:
-    build: ./load_balancer
+    build:
+      context: .
+      dockerfile: load_balancer/Dockerfile
     ports:
       - "8000:8000"
+      - "50051:50051"   # gRPC TelemetryService
     depends_on:
       - postgres
-      - backend
+      - redis
     volumes:
       - ./config/servers.yaml:/app/config/servers.yaml:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - .:/mnt/project:ro
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - GRPC_PORT=50051
     networks:
       - loadbalancer_net
+    # Opt 9: Restart policy so the service recovers automatically
+    restart: unless-stopped
 
   # Scalable backend service
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     environment:
       SERVER_ID: ${HOSTNAME}
+      GRPC_LB_HOST: load_balancer:50051
+      SERVER_HOST: "0.0.0.0"
     networks:
       - loadbalancer_net
+    depends_on:
+      - load_balancer
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
       interval: 10s

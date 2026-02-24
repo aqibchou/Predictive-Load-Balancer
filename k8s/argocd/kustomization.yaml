@@ -1,0 +1,17 @@
+---
+# Kustomize entrypoint for all ArgoCD resources.
+#
+# Apply to a cluster that already has ArgoCD + Argo Rollouts installed:
+#   kubectl apply -k k8s/argocd/
+#
+# Dry-run (requires ArgoCD CRDs to be present):
+#   kubectl apply --dry-run=client -k k8s/argocd/
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - project.yaml            # AppProject — namespace + source restrictions
+  - application.yaml        # Application — Helm chart sync + auto-sync policy
+  - analysis-template.yaml  # AnalysisTemplate — Prometheus success/latency gates
+  - rollout-loadbalancer.yaml  # Rollout — canary steps + analysis reference

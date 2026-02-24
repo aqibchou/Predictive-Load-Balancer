@@ -1,0 +1,23 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: lb-network-loss
+  namespace: predictive-lb
+  annotations:
+    description: >
+      Simulates 100% packet loss on the load balancer pod for 60 s.
+      Expected outcome: eBPF controller detects 3 consecutive health
+      failures (~3 s) → XDP redirects traffic to fallback → zero
+      application-layer traffic drop.
+spec:
+  action: loss
+  mode: one
+  selector:
+    namespaces:
+      - predictive-lb
+    labelSelectors:
+      app.kubernetes.io/component: loadbalancer
+  loss:
+    loss: "100"
+    correlation: "100"
+  duration: 60s

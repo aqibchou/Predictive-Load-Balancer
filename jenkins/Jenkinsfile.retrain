@@ -1,0 +1,193 @@
+// Predictive Load Balancer — Weekly MLOps Retraining Pipeline
+//
+// Trigger: Sunday ~2 AM UTC (H 2 * * 0)
+// Flow:
+//   1. retrain_and_evaluate.py → MAPE comparison → exit 0 if improved
+//   2. (if improved) docker build load_balancer → push to GHCR with retrain-YYYYMMDD tag
+//   3. Commit version bump in values.yaml → ArgoCD auto-syncs
+//   4. Notify with MAPE delta
+
+pipeline {
+    agent any
+
+    environment {
+        GHCR_REGISTRY = 'ghcr.io'
+        LB_IMAGE      = "${GHCR_REGISTRY}/${env.GITHUB_REPOSITORY_OWNER ?: 'YOUR_ORG'}/predictive-lb/load-balancer"
+        IMAGE_TAG     = "retrain-${new Date().format('yyyyMMdd')}"
+    }
+
+    triggers {
+        // Run at approximately 2 AM UTC every Sunday
+        cron('H 2 * * 0')
+    }
+
+    options {
+        timeout(time: 60, unit: 'MINUTES')
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        // ── Stage 1: Retrain & Evaluate ───────────────────────────────────────
+        stage('Retrain & Evaluate') {
+            steps {
+                withCredentials([string(
+                    credentialsId: 'database-url',
+                    variable:      'DATABASE_URL'
+                )]) {
+                    script {
+                        sh '''
+                            python3 -m pip install --quiet \
+                                asyncpg numpy pandas scikit-learn lightgbm
+                            python3 -m pip install --quiet -r load_balancer/requirements.txt
+                        '''
+
+                        // Run retraining; capture output to extract MAPE values
+                        def output = sh(
+                            script: 'python3 jenkins/scripts/retrain_and_evaluate.py 2>&1',
+                            returnStdout: true
+                        ).trim()
+
+                        echo output
+
+                        // Parse PROD_MAPE and NEW_MAPE from the script's stdout
+                        def prodLine = output.readLines().find { it.startsWith('PROD_MAPE=') }
+                        def newLine  = output.readLines().find { it.startsWith('NEW_MAPE=')  }
+                        env.PROD_MAPE = prodLine ? prodLine.split('=')[1] : 'N/A'
+                        env.NEW_MAPE  = newLine  ? newLine.split('=')[1]  : 'N/A'
+
+                        // Determine if the script exited 0 (improved) or 1 (no improvement)
+                        def rc = sh(
+                            script: '''
+                                python3 jenkins/scripts/retrain_and_evaluate.py > /dev/null 2>&1
+                                echo $?
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        // Re-run to capture exit code reliably
+                        def exitCode = sh(
+                            script: 'python3 jenkins/scripts/retrain_and_evaluate.py; echo "EXIT:$?"',
+                            returnStdout: true
+                        ).readLines().find { it.startsWith('EXIT:') }?.split(':')[1]?.trim() ?: '1'
+
+                        env.MODEL_IMPROVED = (exitCode == '0') ? 'true' : 'false'
+                        echo "Model improved: ${env.MODEL_IMPROVED}  (prod=${env.PROD_MAPE}  new=${env.NEW_MAPE})"
+                    }
+                }
+            }
+        }
+
+        // ── Stage 2: Build Image (only if model improved) ─────────────────────
+        stage('Build Image') {
+            when {
+                expression { env.MODEL_IMPROVED == 'true' }
+            }
+            steps {
+                sh '''
+                    docker build \
+                        -t ${LB_IMAGE}:${IMAGE_TAG} \
+                        -t ${LB_IMAGE}:latest \
+                        load_balancer/
+                '''
+            }
+        }
+
+        // ── Stage 3: Push to GHCR ────────────────────────────────────────────
+        stage('Push to GHCR') {
+            when {
+                expression { env.MODEL_IMPROVED == 'true' }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'ghcr-credentials',
+                    usernameVariable: 'GHCR_USER',
+                    passwordVariable: 'GHCR_TOKEN'
+                )]) {
+                    sh '''
+                        echo "${GHCR_TOKEN}" | docker login ${GHCR_REGISTRY} -u "${GHCR_USER}" --password-stdin
+                        docker push ${LB_IMAGE}:${IMAGE_TAG}
+                        docker push ${LB_IMAGE}:latest
+                    '''
+                }
+            }
+        }
+
+        // ── Stage 4: Commit Version Bump ─────────────────────────────────────
+        stage('Commit Version Bump') {
+            when {
+                expression { env.MODEL_IMPROVED == 'true' }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-token',
+                    usernameVariable: 'GIT_USER',
+                    passwordVariable: 'GIT_TOKEN'
+                )]) {
+                    sh '''
+                        # Bump load balancer image tag in Helm values
+                        sed -i "s|tag: .*|tag: ${IMAGE_TAG}|" k8s/helm/predictive-lb/values.yaml
+
+                        git config user.email "jenkins-mlops@ci.local"
+                        git config user.name  "Jenkins MLOps"
+
+                        # Stage model artifacts + values.yaml
+                        git add k8s/helm/predictive-lb/values.yaml
+                        git add load_balancer/models/feature_mask.json  || true
+                        git add load_balancer/models/production_mape.json || true
+
+                        git commit -m "$(printf 'chore(model): auto-retrain %s [skip ci]\n\nMAPE improved from %s to %s' \
+                            "${IMAGE_TAG}" "${PROD_MAPE}" "${NEW_MAPE}")"
+
+                        git push https://${GIT_USER}:${GIT_TOKEN}@$(
+                            git remote get-url origin | sed 's|https://||'
+                        ) HEAD:main
+                    '''
+                }
+            }
+        }
+
+        // ── Stage 5: Notify ───────────────────────────────────────────────────
+        stage('Notify') {
+            steps {
+                script {
+                    if (env.MODEL_IMPROVED == 'true') {
+                        echo """
+=== Retraining Pipeline: MODEL UPDATED ===
+  Image     : ${env.LB_IMAGE}:${env.IMAGE_TAG}
+  MAPE      : ${env.PROD_MAPE} → ${env.NEW_MAPE}
+  ArgoCD    : auto-sync triggered by values.yaml commit
+==========================================
+"""
+                    } else {
+                        echo """
+=== Retraining Pipeline: NO UPDATE ===
+  MAPE (prod): ${env.PROD_MAPE}
+  MAPE (new) : ${env.NEW_MAPE}
+  Result     : improvement below 5% threshold — skipping deploy
+=======================================
+"""
+                    }
+                }
+            }
+        }
+
+    } // end stages
+
+    post {
+        failure {
+            echo "Retraining pipeline FAILED — check logs above"
+        }
+        always {
+            archiveArtifacts artifacts: 'load_balancer/models/*.json',
+                             allowEmptyArchive: true
+        }
+    }
+}

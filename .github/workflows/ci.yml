@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      # Lint load_balancer, backend, scripts, tests, and ebpf controller
+      - run: |
+          ruff check load_balancer/ scripts/ tests/unit/ ebpf/controller.py \
+            --ignore E501,F401,E701,E402
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('load_balancer/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install dependencies
+        run: |
+          pip install \
+            pytest \
+            pytest-asyncio \
+            numpy \
+            pandas \
+            scikit-learn \
+            lightgbm \
+            grpcio>=1.62.0 \
+            grpcio-tools>=1.62.0 \
+            psutil \
+            prometheus-client
+      - name: Generate proto stubs
+        run: bash telemetry/generate_proto.sh
+      - name: Run unit tests
+        run: pytest tests/unit/ -v --tb=short
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+
+  docker-build:
+    name: Docker build check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build load balancer image
+        # Build context is project root so COPY telemetry/ works
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: load_balancer/Dockerfile
+          push: false
+          tags: predictive-lb-load-balancer:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: false
+          tags: predictive-lb-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm-lint:
+    name: Helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint Helm chart
+        run: |
+          helm lint k8s/helm/predictive-lb/ \
+            --set postgres.auth.password=test \
+            --set grafana.adminPassword=test

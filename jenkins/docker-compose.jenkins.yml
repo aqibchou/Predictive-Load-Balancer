@@ -1,0 +1,53 @@
+# Jenkins LTS controller for local setup.
+#
+# Usage:
+#   docker-compose -f jenkins/docker-compose.jenkins.yml up -d
+#
+# First-time setup:
+#   docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+#   Open http://localhost:8080 and complete the wizard.
+#   Install plugins via: Manage Jenkins → Plugin Manager → Upload Plugin
+#   (or use the jenkins-plugin-cli from plugins.txt on first boot)
+#
+# Docker-in-Docker note:
+#   The Jenkins container runs as root and binds the host Docker socket, giving
+#   pipelines access to the Docker daemon without DinD overhead.
+#   A Docker CLI is installed at container startup via the JAVA_OPTS entrypoint
+#   override — see the `command` section below.
+
+version: "3.9"
+
+services:
+  jenkins:
+    # Build a thin extension that adds Docker CLI on top of Jenkins LTS
+    build:
+      context: .
+      dockerfile: Dockerfile.jenkins
+    container_name: jenkins
+    user: root
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # web UI
+      - "50000:50000" # inbound agent (JNLP)
+    volumes:
+      # Persist all Jenkins state (jobs, plugins, credentials, build history)
+      - jenkins_home:/var/jenkins_home
+      # Bind the host Docker socket so pipelines can run docker build / push
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount the repo root so local testing is easy
+      - ..:/workspace:ro
+    environment:
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      # Skip the initial setup wizard when CASC (Configuration-as-Code) is used
+      # Remove this line if you want the interactive first-time wizard
+      # - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost:8080/login || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  jenkins_home:
+    driver: local

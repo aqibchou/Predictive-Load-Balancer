@@ -1,0 +1,71 @@
+---
+# ArgoCD Application — watches the Helm chart in this repo and auto-syncs
+# whenever Jenkins commits a values.yaml version bump to main.
+#
+# GitOps flow:
+#   Jenkins build pushes image → bumps loadBalancer.image.tag in values.yaml
+#   → git push to main → ArgoCD detects diff → auto-sync → Argo Rollouts
+#   executes canary strategy defined in rollout-loadbalancer.yaml
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: predictive-lb
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: predictive-lb
+
+  # ── Source: Helm chart tracked in Git ─────────────────────────────────────
+  source:
+    repoURL: https://github.com/YOUR_ORG/Predictive-Load-Balancer.git
+    targetRevision: main
+    path: k8s/helm/predictive-lb
+
+    helm:
+      # Production overrides — secrets injected via ArgoCD Vault plugin or
+      # external-secrets; set here as placeholders
+      values: |
+        loadBalancer:
+          image:
+            repository: ghcr.io/YOUR_ORG/predictive-lb/load-balancer
+        backend:
+          image:
+            repository: ghcr.io/YOUR_ORG/predictive-lb/backend
+
+  # ── Destination ──────────────────────────────────────────────────────────
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: predictive-lb
+
+  # ── Sync policy: fully automated with self-healing ───────────────────────
+  syncPolicy:
+    automated:
+      prune: true          # remove resources deleted from Git
+      selfHeal: true       # revert out-of-band cluster changes
+      allowEmpty: false    # never sync to an empty manifest set
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+
+  # ── Health assessment ────────────────────────────────────────────────────
+  # ArgoCD understands Argo Rollouts natively when the rollouts controller
+  # is installed; it reports Rollout health as Healthy/Degraded/Progressing.
+  ignoreDifferences:
+    # Ignore the replica count managed by HPA
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    - group: argoproj.io
+      kind: Rollout
+      jsonPointers:
+        - /spec/replicas

@@ -1,0 +1,119 @@
+---
+# Argo Rollouts — Canary rollout for the load balancer.
+#
+# Traffic is shifted by replica-count weight (no ingress controller needed):
+#
+#   Step 1: setWeight  5%  →  ~1 canary pod  (5% of requests by replica ratio)
+#   Step 2: pause      5m  →  bake time
+#   Step 3: analysis   →   lb-success-rate AnalysisTemplate (5 × 1-min checks)
+#   Step 4: setWeight 50%  →  half traffic to canary
+#   Step 5: pause      2m  →  short settle
+#   Step 6: setWeight 100% →  full promotion (old pods terminated)
+#
+# On analysis failure → automatic rollback to previous stable ReplicaSet.
+# Jenkins triggers this by bumping loadBalancer.image.tag in values.yaml;
+# ArgoCD detects the commit and syncs, which updates this Rollout's image.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: predictive-lb-loadbalancer
+  namespace: predictive-lb
+  labels:
+    app.kubernetes.io/name: predictive-lb-loadbalancer
+    app.kubernetes.io/part-of: predictive-lb
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: predictive-lb-loadbalancer
+  template:
+    metadata:
+      labels:
+        app: predictive-lb-loadbalancer
+        app.kubernetes.io/name: predictive-lb-loadbalancer
+    spec:
+      serviceAccountName: predictive-lb
+      containers:
+        - name: load-balancer
+          # Image tag is updated by Jenkins; ArgoCD propagates the change
+          image: ghcr.io/YOUR_ORG/predictive-lb/load-balancer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: predictive-lb-secrets
+                  key: database-url
+            - name: REDIS_URL
+              value: redis://predictive-lb-redis:6379
+            - name: SERVER_CONFIG_PATH
+              value: /app/config/servers.yaml
+            - name: MASK_FALLBACK_PATH
+              value: /app/models/feature_mask.json
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          volumeMounts:
+            - name: servers-config
+              mountPath: /app/config
+              readOnly: true
+            - name: models
+              mountPath: /app/models
+      volumes:
+        - name: servers-config
+          configMap:
+            name: predictive-lb-servers-config
+        - name: models
+          emptyDir: {}
+
+  strategy:
+    canary:
+      # Analysis runs after the first 5-min pause to validate the canary
+      analysis:
+        templates:
+          - templateName: lb-success-rate
+        startingStep: 2        # run analysis after step index 2 (after first pause)
+        args:
+          - name: service-name
+            value: predictive-lb-loadbalancer-canary
+
+      steps:
+        # ── Phase 1: Small canary — 5% traffic ────────────────────────────────
+        - setWeight: 5
+        - pause:
+            duration: 5m
+
+        # ── Phase 2: Prometheus health analysis (see analysis-template.yaml) ──
+        # (analysis runs automatically here per startingStep: 2)
+
+        # ── Phase 3: Ramp to 50% ──────────────────────────────────────────────
+        - setWeight: 50
+        - pause:
+            duration: 2m
+
+        # ── Phase 4: Full promotion ───────────────────────────────────────────
+        - setWeight: 100

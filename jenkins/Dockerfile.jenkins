@@ -1,0 +1,32 @@
+# Extends Jenkins LTS with Docker CLI so pipelines can build and push images.
+# The Docker daemon is provided by the host via socket bind-mount — no DinD.
+
+FROM jenkins/jenkins:lts-jdk17
+
+USER root
+
+# Install Docker CLI (engine not needed — socket comes from the host)
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        lsb-release && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+    chmod a+r /etc/apt/keyrings/docker.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+        https://download.docker.com/linux/debian \
+        $(. /etc/os-release && echo "${VERSION_CODENAME}") stable" \
+        > /etc/apt/sources.list.d/docker.list && \
+    apt-get update -qq && \
+    apt-get install -y --no-install-recommends docker-ce-cli && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Python 3 + pip for the retrain script and load test gate
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+USER jenkins

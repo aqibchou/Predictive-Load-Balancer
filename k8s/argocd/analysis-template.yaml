@@ -1,0 +1,50 @@
+---
+# AnalysisTemplate — evaluated during every canary rollout step.
+#
+# Two health gates run in parallel, each sampled every 1 min × 5 checks:
+#   1. success_rate  ≥ 99%   (based on Prometheus counter loadbalancer_requests_total)
+#   2. p95_latency   < 500ms (based on histogram loadbalancer_request_latency_seconds_bucket)
+#
+# A single bad reading (failureLimit: 1) triggers an automatic rollback to the
+# previous stable revision — no human intervention required.
+#
+# Metric names match load_balancer/metrics.py exactly:
+#   loadbalancer_requests_total{status="success"|"error"}
+#   loadbalancer_request_latency_seconds_bucket{le="..."}
+
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: lb-success-rate
+  namespace: predictive-lb
+spec:
+  metrics:
+
+    # ── Gate 1: Success rate ≥ 99% ─────────────────────────────────────────────
+    - name: success-rate
+      interval: 1m
+      count: 5                              # 5 consecutive 1-min checks (~5 min bake)
+      successCondition: result[0] >= 0.99
+      failureLimit: 1                       # 1 bad reading triggers rollback
+      provider:
+        prometheus:
+          address: http://predictive-lb-prometheus:9090
+          query: |
+            sum(rate(loadbalancer_requests_total{status="success"}[2m]))
+            /
+            sum(rate(loadbalancer_requests_total[2m]))
+
+    # ── Gate 2: P95 latency < 500 ms ─────────────────────────────────────────
+    - name: p95-latency-seconds
+      interval: 1m
+      count: 5
+      successCondition: result[0] < 0.5    # 0.5 s = 500 ms
+      failureLimit: 1
+      provider:
+        prometheus:
+          address: http://predictive-lb-prometheus:9090
+          query: |
+            histogram_quantile(
+              0.95,
+              sum(rate(loadbalancer_request_latency_seconds_bucket[2m])) by (le)
+            )

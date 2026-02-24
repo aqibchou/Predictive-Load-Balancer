@@ -1,0 +1,31 @@
+{{- if and .Values.serviceAccount.create .Values.loadBalancer.k8sScaling.enabled }}
+# Allows the load balancer to scale the backend Deployment via the K8s API
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "predictive-lb.fullname" . }}-scaler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "predictive-lb.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "update", "patch"]
+    resourceNames: ["{{ include "predictive-lb.fullname" . }}-backend"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "predictive-lb.fullname" . }}-scaler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "predictive-lb.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "predictive-lb.fullname" . }}-scaler
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "predictive-lb.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

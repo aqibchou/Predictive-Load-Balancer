@@ -1,10 +1,10 @@
 servers:
-  - url: "http://project-group-101-backend-1:8000"
+  - url: "http://backend:8000"
     weight: 1
     id: "backend-1"
-  - url: "http://project-group-101-backend-2:8000"
+  - url: "http://backend:8000"
     weight: 1
     id: "backend-2"
-  - url: "http://project-group-101-backend-3:8000"
+  - url: "http://backend:8000"
     weight: 1
     id: "backend-3"
