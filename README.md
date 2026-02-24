@@ -272,7 +272,3 @@ Python · FastAPI · gRPC (grpcio/grpc.aio) · Protocol Buffers · LightGBM · s
 ## Original Author
 
 Mohammed Qureshi — Carleton University
-
-## Fork Extensions
-
-Aqib Choudhary
