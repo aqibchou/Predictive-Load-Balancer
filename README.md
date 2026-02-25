@@ -28,21 +28,19 @@ A proactive load balancing system that predicts traffic patterns and makes intel
 
 ### Locust Stress Test — Dev Gate (50 users, 60 s)
 
-Measured after replacing simulated `asyncio.sleep` with real SHA-256 computation + genuine LRU cache + background Redis sync + persistent httpx client + atomic `HINCRBY`. The dominant cost is the httpx round-trip through the Docker bridge (~7–10 ms at P50). Cache hits complete in microseconds at the backend; cache misses run SHA-256 in a thread pool.
+Backends run real SHA-256 computation + genuine LRU cache + background Redis sync + persistent httpx client + atomic `HINCRBY`. The dominant cost is the httpx round-trip through the Docker bridge (~7–10 ms at P50). Cache hits complete in microseconds at the backend; cache misses run SHA-256 in a thread pool.
 
-| Endpoint | Requests | P50 | P95 | P99 | Errors | vs. before |
-|----------|----------|-----|-----|-----|--------|------------|
-| `/data` | 1,290 | 8 ms | 39 ms | 110 ms | 0 | **24× faster** |
-| `/data[burst]` | 9,032 | 7 ms | 28 ms | 65 ms | 0 | **27× faster** |
-| `/data[hot]` | 2,947 | 8 ms | 34 ms | 75 ms | 0 | **24× faster** |
-| `/data[cold]` | 335 | 8 ms | 34 ms | 83 ms | 0 | real compute |
-| `/compute` | 426 | 17 ms | 49 ms | 100 ms | 0 | real CPU work |
-| `/compute[burst]` | 2,279 | 17 ms | 41 ms | 77 ms | 0 | real CPU work |
-| `/health` | 230 | 3 ms | 6 ms | 13 ms | 0 | — |
-| `/prediction` | 214 | 3 ms | 6 ms | 14 ms | 0 | — |
-| **Aggregated** | **16,753** | **8 ms** | **33 ms** | **73 ms** | **0** | **16× faster** |
-
-"vs. before" compares to the original locust run (P50=190 ms, avg=200 ms) with simulated sleep. Improvement is calculated on avg latency: 199 ms → 12.3 ms = 16×. The `/data[burst]` and `/data[hot]` routes improve more because the LRU cache means those paths hit a Python `OrderedDict` lookup rather than running SHA-256 through a thread pool.
+| Endpoint | Requests | P50 | P95 | P99 | Errors |
+|----------|----------|-----|-----|-----|--------|
+| `/data` | 1,290 | 8 ms | 39 ms | 110 ms | 0 |
+| `/data[burst]` | 9,032 | 7 ms | 28 ms | 65 ms | 0 |
+| `/data[hot]` | 2,947 | 8 ms | 34 ms | 75 ms | 0 |
+| `/data[cold]` | 335 | 8 ms | 34 ms | 83 ms | 0 |
+| `/compute` | 426 | 17 ms | 49 ms | 100 ms | 0 |
+| `/compute[burst]` | 2,279 | 17 ms | 41 ms | 77 ms | 0 |
+| `/health` | 230 | 3 ms | 6 ms | 13 ms | 0 |
+| `/prediction` | 214 | 3 ms | 6 ms | 14 ms | 0 |
+| **Aggregated** | **16,753** | **8 ms** | **33 ms** | **73 ms** | **0** |
 
 gRPC telemetry confirmed active — LB logs showed `[gRPC] TelemetryService received: backend-1 rt=51.3ms` every 5 s.
 
@@ -56,46 +54,33 @@ gRPC telemetry confirmed active — LB logs showed `[gRPC] TelemetryService rece
 [eBPF] health success → circuit CLOSED     (XDP map[0] = 0)
 ```
 
-### A* vs Round-Robin (50 users, measured A* / estimated Round-Robin)
-
-A* routing is always active during all Locust runs above. Round-Robin numbers are estimated from the known difference: at P99, A* prevents any single backend from accumulating a queue. Observed A* P99=73 ms at 50 users.
-
-| Metric | A* Routing (measured) | Round-Robin (estimated) | Improvement |
-|--------|----------------------|------------------------|-------------|
-| Avg latency | **12.3 ms** | ~18 ms | ~32% faster |
-| P95 | **33 ms** | ~55 ms | ~40% faster |
-| P99 | **73 ms** | ~160 ms | **~54% faster** |
-| Errors | 0 | 0 | — |
-
-The P99 gap is where A* matters most: when one backend transiently accumulates concurrent requests, A* detects elevated `active_requests` via the Redis-synced `_local_state` and routes the next request to a less-loaded peer. Round-Robin cannot react — it sends a fixed fraction to the overloaded backend, amplifying tail latency.
-
 ### Traffic Spike (100 users, 60 s — measured)
 
 2× the steady-state load. All backends saturated with concurrent requests. Zero failures.
 
-| Metric | Original sim (50u) | New (50u measured) | New (100u spike) |
-|--------|--------------------|--------------------|-----------------|
-| Avg latency | 199.9 ms | **12.3 ms** | 99.2 ms |
-| P50 | 190 ms | **8 ms** | 85 ms |
-| P95 | 400 ms | **33 ms** | 210 ms |
-| P99 | 470 ms | **73 ms** | 320 ms |
-| RPS | 104 | 283 | 339 |
-| Errors | 0 | 0 | 0 |
+| Metric | 50u (measured) | 100u spike (measured) |
+|--------|----------------|-----------------------|
+| Avg latency | **12.3 ms** | 99.2 ms |
+| P50 | **8 ms** | 85 ms |
+| P95 | **33 ms** | 210 ms |
+| P99 | **73 ms** | 320 ms |
+| RPS | 283 | 339 |
+| Errors | 0 | 0 |
 
-Even under a 100-user spike (339 RPS peak), latency stays within 210 ms P95 with zero failures. The system handles 3× the original throughput at half the original latency floor.
+Even under a 100-user spike (339 RPS peak), latency stays within 210 ms P95 with zero failures.
 
-The 320 ms P99 at 100 users is a Docker Desktop on macOS artefact: the HyperKit VM bridge adds ~7 ms per round-trip at low concurrency and degrades nonlinearly as concurrent connections grow. On real Linux hardware (Docker bridge ≈ 0.3 ms), the same workload would have a P99 of roughly 40–80 ms. An `asyncio.Semaphore` on the thread-pool calls was tested and made P99 worse in this environment because the actual bottleneck is the virtual network layer, not the Python thread pool.
+The 320 ms P99 at 100 users is a Docker Desktop on macOS artefact: the HyperKit VM bridge adds ~7 ms per round-trip at low concurrency and degrades nonlinearly as concurrent connections grow. On real Linux hardware (Docker bridge ≈ 0.3 ms), the same workload would produce a P99 of roughly 40–80 ms.
 
 
 ### Cache Performance (50-user run, measured)
 
-| Metric | Before | Measured |
-|--------|--------|----------|
-| Cache hit rate | 98.97% | ~99% |
-| Avg latency `/data[hot]` (≥98% hits) | 175.2 ms | **11.8 ms** |
-| Avg latency `/data[cold]` (100% misses) | 200 ms (simulated) | **12.2 ms** |
-| Avg latency `/compute` (real CPU) | 179.7 ms (simulated) | **21.9 ms** |
-| P50 end-to-end (hit vs miss) | 190 ms / 200 ms | **8 ms / 8 ms** |
+| Metric | Measured |
+|--------|----------|
+| Cache hit rate | ~99% |
+| Avg latency `/data[hot]` (≥98% hits) | **11.8 ms** |
+| Avg latency `/data[cold]` (100% misses) | **12.2 ms** |
+| Avg latency `/compute` (real CPU) | **21.9 ms** |
+| P50 end-to-end (hit vs miss) | **8 ms / 8 ms** |
 
 Cache hits and misses share almost identical P50 latency (both 8 ms) because the dominant cost is the Docker bridge round-trip (~7 ms), not the computation. On a cache hit, the backend returns in <0.1 ms. On a miss, SHA-256 (10 k rounds) completes in ~25–35 ms inside a thread pool — but at low-to-moderate concurrency the thread pool serves it fast enough to stay within the same P50 bucket. The tail difference appears at P95 and higher when the thread pool is saturated.
 
@@ -116,15 +101,6 @@ Cache hits and misses share almost identical P50 latency (both 8 ms) because the
 | R² | 0.659 | **0.998** |
 | Blocks event loop | Yes | **No** |
 
-### Original Benchmark — Predictive vs Reactive Scaling (11,077 requests)
-
-> These numbers are from the upstream repo's simulation (200 ms artificial backend sleep). The absolute latency values no longer apply to this fork's real-computation backend, but the **relative** improvement from predictive scaling over reactive scaling holds: Q-learning prevents spike queuing regardless of the backend's inherent response time.
-
-| Metric | Reactive | Predictive | Relative improvement |
-|--------|----------|------------|----------------------|
-| Spike Avg Latency | baseline × 12× | baseline × 1× | **~92% reduction** |
-| Spike P95 Latency | baseline × 14× | baseline × 1× | **~93% reduction** |
-| Varied Phase Avg | baseline × 12× | baseline × 5.5× | **~55% reduction** |
 
 ---
 
@@ -191,7 +167,7 @@ load_balancer | [gRPC] TelemetryService received: backend-1 active_req=0 rt=0.0m
 ```bash
 pip install pytest pytest-asyncio numpy pandas scikit-learn lightgbm grpcio grpcio-tools psutil prometheus-client
 bash telemetry/generate_proto.sh
-pytest tests/unit/ -v   # 97 tests: 28 routing + 26 gRPC + 43 eBPF
+pytest tests/unit/ -v   # 107 tests: routing + gRPC + eBPF + BiStacking
 ```
 
 ### Run stress test
@@ -233,7 +209,7 @@ GitHub Actions runs four parallel jobs on every push to `main`:
 | Job | What It Does |
 |-----|-------------|
 | **lint** | `ruff check` across `load_balancer/`, `scripts/`, `tests/unit/`, `ebpf/controller.py` |
-| **test** | `generate_proto.sh` → `pytest tests/unit/ -v` (97 tests) |
+| **test** | `generate_proto.sh` → `pytest tests/unit/ -v` (107 tests) |
 | **docker-build** | Build LB + backend images from root context; no push |
 | **helm-lint** | `helm lint k8s/helm/predictive-lb/` |
 
