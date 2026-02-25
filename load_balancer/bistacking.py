@@ -87,6 +87,8 @@ class BiStackingEnsemble:
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
+        if self._meta_learner is None:
+            raise RuntimeError("Call fit() before predict().")
         return self._meta_learner.predict(self._l0_predict(X))
 
     def predict_proba(self, X: np.ndarray) -> dict[str, np.ndarray]:
