@@ -48,7 +48,8 @@ jobs:
             "grpcio-tools>=1.70.0" \
             httpx \
             psutil \
-            prometheus-client
+            prometheus-client \
+            requests
       - name: Generate proto stubs
         run: bash telemetry/generate_proto.sh
       - name: Run unit tests
