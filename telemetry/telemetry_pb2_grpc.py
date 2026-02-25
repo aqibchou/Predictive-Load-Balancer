@@ -3,10 +3,7 @@
 import grpc
 import warnings
 
-try:
-    from telemetry import telemetry_pb2 as telemetry__pb2
-except ImportError:
-    import telemetry_pb2 as telemetry__pb2
+from telemetry import telemetry_pb2 as telemetry__pb2
 
 GRPC_GENERATED_VERSION = '1.70.0'
 GRPC_VERSION = grpc.__version__

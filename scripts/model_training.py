@@ -301,14 +301,14 @@ def train_models(input_file: Path, models_dir: Path, results_dir: Path):
     target_mae = 0.15 * avg_traffic
     prophet_mae = prophet_metrics['MAE']
     
-    print(f"\nProphet performance:")
+    print("\nProphet performance:")
     print(f"  MAE: {prophet_mae:.2f} req/min")
     print(f"  Target: < {target_mae:.2f} req/min (15% of avg traffic)")
     
     if prophet_mae < target_mae:
-        print(f"  Status: PASSED")
+        print("  Status: PASSED")
     else:
-        print(f"  Status: FAIL")
+        print("  Status: FAIL")
     
     # Save models
     print(f"\n{'='*60}")
@@ -360,7 +360,7 @@ if __name__ == "__main__":
     # Validate input exists
     if not input_file.exists():
         print(f"ERROR: Input file not found: {input_file}")
-        print(f"Run Step 1.3 first: python scripts/03_engineer_features.py")
+        print("Run Step 1.3 first: python scripts/03_engineer_features.py")
         sys.exit(1)
     
     # Run training

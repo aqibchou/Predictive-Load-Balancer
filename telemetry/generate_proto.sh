@@ -18,6 +18,14 @@ python3 -m grpc_tools.protoc \
     --grpc_python_out="$SCRIPT_DIR" \
     "$SCRIPT_DIR/telemetry.proto"
 
+# grpc_tools.protoc emits a bare "import telemetry_pb2" which only works
+# when the telemetry/ directory is on sys.path directly. Patch it to a
+# package-relative import so it works when imported as "from telemetry import ...".
+sed -i.bak \
+    's/^import telemetry_pb2 as telemetry__pb2$/from telemetry import telemetry_pb2 as telemetry__pb2/' \
+    "$SCRIPT_DIR/telemetry_pb2_grpc.py"
+rm -f "$SCRIPT_DIR/telemetry_pb2_grpc.py.bak"
+
 echo "Generated:"
 echo "  $SCRIPT_DIR/telemetry_pb2.py"
 echo "  $SCRIPT_DIR/telemetry_pb2_grpc.py"
