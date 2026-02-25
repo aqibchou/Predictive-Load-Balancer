@@ -220,12 +220,12 @@ def engineer_features(input_file: Path, output_file: Path):
     print(f"Minute-level rows:             {before_dropna:,}")
     print(f"After handling NaN:            {after_dropna:,}")
     print(f"Total features created:        {len(df_minute.columns) - 1}")
-    print(f"\nFeature categories:")
-    print(f"  Time features:       5")
-    print(f"  Aggregated metrics:  4")
-    print(f"  Rolling windows:     5")
-    print(f"  Lag features:        6")
-    print(f"  Statistical:         3")
+    print("\nFeature categories:")
+    print("  Time features:       5")
+    print("  Aggregated metrics:  4")
+    print("  Rolling windows:     5")
+    print("  Lag features:        6")
+    print("  Statistical:         3")
     
     # Save featured data
     print(f"\nSaving to: {output_file}")
@@ -246,7 +246,7 @@ if __name__ == "__main__":
     # Validate input exists
     if not input_file.exists():
         print(f"ERROR: Input file not found: {input_file}")
-        print(f"Run Step 1.2 first: python scripts/02_clean_data.py")
+        print("Run Step 1.2 first: python scripts/02_clean_data.py")
         sys.exit(1)
     
     # Run feature engineering

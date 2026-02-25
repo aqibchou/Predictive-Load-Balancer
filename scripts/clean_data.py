@@ -128,7 +128,7 @@ def clean_data(input_file: Path, output_file: Path):
     8. Save cleaned data
     """
     print(f"Reading from: {input_file}")
-    print(f"Loading data into memory...\n")
+    print("Loading data into memory...\n")
     
     # Load CSV
     # low_memory=False will prevents pandas from guessing types incorrectly
